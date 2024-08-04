@@ -2,7 +2,7 @@
 So far we have 
 - Solar elevation.
 - Two different methods of mapping brightness based on elevation of sun.
-- A LED brighness curve that really only works in 8-bit mode. Math doesn't seem to work as well with 16-bit PWM. 
+- A LED brightness curve that really only works in 8-bit mode. Math doesn't seem to work as well with 16-bit PWM. 
 - 16-bit PWM - MUCH smoother!
 - Switch that can disable Skylight mode and read a potentiometer instead.
 
@@ -19,35 +19,38 @@ Designed for Board: Arduino Uno
 RTC_DS3231 rtc;
 
 // Configuration Variables
-const float latitude = 34.21316116274671; // Hardcode your current location for skylight mode
+const float latitude = 34.21316116274671;   // Hardcode your current location for skylight mode
 const float longitude = -84.54894616203148; // Hardcode your current location for skylight mode
-const int time_zone = -4; // This just needs to match whatever time you programmed into your RTC device
-const uint8_t daylight_value = 200; // Compared to full range of 0-255 - my light is way to bright for indoors 
-const uint16_t daylight_value16 = 55000;
-const uint8_t minIllum = 1;
-const uint16_t minIllum16 = 25; // Because some displays really don't like being super low on the PWM signal.
-const int photoOffset = -50; // The photoresistors aren't identical, and their connections and cord lengths aren't identical. The external reading will be adjusted by this much.
-#define MODE_POTENTIOMETER // Only include the modes you want available
+#define DAYLIGHT_VALUE 200                  // Compared to full range of 0-255 - my light is way too bright for indoors 
+#define DAYLIGHT_VALUE16 55000
+#define MIN_ILLUM 1
+#define MIN_ILLUM16 25                      // Because some displays really don't like being super low on the PWM signal.
+#define PHOTO_OFFSET -50                    // The photoresistors aren't identical, and their connections and cord lengths aren't identical. The external reading will be adjusted by this much.
+#define DIMMING_TIME 30000                  // OLED dimming time in milliseconds (30 seconds)
+#define DIMMED_BRIGHTNESS 5                 // OLED dimmed brightness as a percentage (5%)
+#define OFF_TIME 300000                     // OLED Off time in milliseconds (5 minutes)
+#define SKY_CHECK_INTERVAL 10000            // Used in mode 1&2 - only update skylight every xx milliseconds
+#define OLED_UPDATE_INTERVAL 500            // Milliseconds between OLED display updates
+
+// Enabled Modes
+#define MODE_POTENTIOMETER                  // Only include the modes you want available
 #define MODE_SKYLIGHT1
 #define MODE_SKYLIGHT2
 //#define MODE_PHOTO_MATCH
 #define MODE_DEMO
-unsigned long dimmingTime = 30000; // OLED dimming time in milliseconds (30 seconds)
-uint8_t dimmedBrightness = 5; // OLED dimmed brightness as a percentage (5%)
-unsigned long offTime = 300000; // OLED Off time in milliseconds (5 minutes)
 
 // Pin Designations
-const uint8_t led_pin = 11; 
-const uint8_t led_pin16 = 9;
-const uint8_t mode_sw = 8; 
-const uint8_t photo_int_pin = A2;
-const uint8_t photo_ext_pin = A1;
-const uint8_t pot_pin = A0;
+#define LED_PIN 11
+#define LED_PIN16 9
+#define MODE_SW 8
+#define PHOTO_INT_PIN A2
+#define PHOTO_EXT_PIN A1
+#define POT_PIN A0
 
 // OLED Setup
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 32 // OLED display height, in pixels
-#define OLED_RESET    -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_WIDTH 128        // OLED display width, in pixels
+#define SCREEN_HEIGHT 32        // OLED display height, in pixels
+#define OLED_RESET    -1        // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Debugging setup
@@ -56,60 +59,68 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define DEBUG_WARNING 2
 #define DEBUG_INFO 3
 #define DEBUG_VERBOSE 4
+#define DEBUG_NEVER 9 // This is really only a placeholder. If you want to see this information, change the debug level on the specific line of code from NEVER to something else.
 
-#define DEBUG_LEVEL DEBUG_INFO // Set the debug level here
+#define DEBUG_LEVEL DEBUG_WARNING       // Set the debug level here
 
 #define DEBUG_PRINT(level, message) \
     do { if (DEBUG_LEVEL >= level) Serial.print(message); } while (0)
 #define DEBUG_PRINTLN(level, message) \
     do { if (DEBUG_LEVEL >= level) Serial.println(message); } while (0)
 
+// EEPROM addresses
+#define ADDR_SIGNATURE 0                // Address for signature
+#define ADDR_MODE 1                     // Address for the mode
+#define EEPROM_SIGNATURE 0xD4           // Signature byte
+
 // Global Scope Declarations
 unsigned long currentMillis = 0;        // stores the value of millis() in each iteration of loop()
-unsigned long previousMillis = 0;       // for various timings
-unsigned long previousButtonMillis = 0; // time when button press last occured - for debounce
-uint8_t curmode = 0;                    // 0-Manual, 1-Skylight1, 2-Skylight2, 3-PhotoMatch, 4-Demo
-int potval;                             // Used in mode 0 - value read from the potentiometer on pot_pin
-int previousPotval = 0;                 // Used to change to manual mode from other modes
-const int skyCheckInterval = 10000;     // Used in mode 1&2 - only update skylight every 10 seconds
-int photo_int;                          // Used in mode 3 - value read from the indoor photoresistor
-int photo_ext;                          // Used in mode 3 - value read from the outdoor photoresistor
-boolean demoDirectionUp = true;         // Used in mode 4 - state variable
-uint8_t demoCounter = 255;              // Used in mode 4 - increment the 8-bit PWM value once every 256 iterations of the 16-bit loop
-uint8_t led_value = 10;                 // This will be the dynamic LED brighness sent to PWM
-uint16_t led_value16 = minIllum16;      // 16-bit version. Only keeping the 8-bit for legacy compatibility
-const uint16_t icr = 0xffff;            // I don't really understand this but it's used in setting up 16-bit PWM
+unsigned long previousMillis = 0;       // for various timings - mode dependent
 unsigned long lastInteractionTime = 0;  // Global variable to track the last interaction time for OLED dimming
+unsigned long lastOledUpdateMillis = 0; // Global variable to limit OLED updates
+uint8_t curmode = 0;                    // 0-Manual, 1-Skylight1, 2-Skylight2, 3-PhotoMatch, 4-Demo
+uint8_t led_value = 10;                 // This will be the dynamic LED brightness sent to PWM
+uint16_t led_value16 = MIN_ILLUM16;     // 16-bit version. Only keeping the 8-bit for legacy compatibility
+#define ICR 0xffff                      // I don't really understand this but it's used in setting up 16-bit PWM
 bool isDimmed = false;                  // Variable to track the current display brightness state
 bool isOff = false;                     // Variable to track the current display brightness state
 
-// EEPROM addresses
-const int ADDR_SIGNATURE = 0;           // Address for signature
-const int ADDR_MODE = 1;                // Address for the mode
-const uint8_t EEPROM_SIGNATURE = 0xD4;  // Signature byte
-
-// Debounce variables for MODE_POTENTIOMETER
+// Global variables for MODE_POTENTIOMETER
 #if defined(MODE_POTENTIOMETER)
+int potval;                             // Used in mode 0 - value read from the potentiometer on pot_pin
+int previousPotval = 0;                 // Used to change to manual mode from other modes
 #define AVERAGE_BUFFER_SIZE 100         // Number of readings to average
 int potReadings[AVERAGE_BUFFER_SIZE];   // Array to store the potentiometer readings
 int readIndex = 0;                      // Index for the next reading
-int total = 0;                          // Running total of the readings
+long total = 0;                         // Running total of the readings
 int average = 0;                        // Average of the readings
 #endif
 
-// Variables used in Skylight Mode 1
+// Global variables used in Skylight Mode 1
 #if defined(MODE_SKYLIGHT1)
 float relative_brightness;
 float relative_brightness16;
 #endif
 
-// Variables used in Skylight Mode 2
+// Global variables used in Skylight Mode 2
 #if defined(MODE_SKYLIGHT2)
-const float match_elevation = 1; // Elevation angle at which we switch between twilight and daylight models. Don't recommend you change it. 
-const float astronomical_decay_constant = 0.15; // For how slow the twilight transformation goes
-const float diffuse_scaling_factor = 1; // Will be multiplied. 1 means no change. Higher emphasises the impact of ambient reflection of light
+#define MATCH_ELEVATION 1                // Elevation angle at which we switch between twilight and daylight models. Don't recommend you change it.
+#define ASTRONOMICAL_DECAY_CONSTANT 0.15 // For how slow the twilight transformation goes
+#define DIFFUSE_SCALING_FACTOR 1         // Will be multiplied. 1 means no change. Higher emphasises the impact of ambient reflection of light
 float match_factor;
 float max_combined_level = 0;
+#endif
+
+// Global variables used in Photo Match Mode
+#if defined(MODE_PHOTO_MATCH)
+int photo_int;                          // Used in mode 3 - value read from the indoor photoresistor
+int photo_ext;                          // Used in mode 3 - value read from the outdoor photoresistor
+#endif
+
+// Global variables used in Demo Mode
+#if defined(MODE_DEMO)
+boolean demoDirectionUp = true;         // Used in mode 4 - state variable
+uint8_t demoCounter = 255;              // Used in mode 4 - increment the 8-bit PWM value once every 256 iterations of the 16-bit loop
 #endif
 
 // Function Prototypes
@@ -123,7 +134,11 @@ void initializeEEPROM();
 void setupPWM16();
 void analogWrite16(uint8_t pin, uint16_t val);
 void readButton();
+void cycleModes();
 void updateMode(uint8_t curmode);
+void enterTimeSettingMode();
+void adjustTimeWithPot();
+void displayTimeSetting(const DateTime &now);
 void updateDisplay(const char* mode, float elevation, uint16_t led_value16);
 uint8_t gammaCorrection(uint8_t led_value, float gamma = 2.2);
 uint16_t gammaCorrection16(uint16_t led_value16, float gamma = 2.2);
@@ -134,8 +149,8 @@ void setup() {
   Serial.println("Serial started");
   DEBUG_PRINTLN(DEBUG_INFO, "Setup started");
 
-  pinMode(led_pin, OUTPUT);
-  pinMode(mode_sw, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(MODE_SW, INPUT_PULLUP);
   setupPWM16();
   
   // Restore last mode
@@ -177,9 +192,9 @@ void setup() {
   // Used in Skylight Mode 2 - Calculate combined and twilight light intensities at a matching point
   #if defined(MODE_SKYLIGHT2)
   // Calculate the match factor - so we have a smooth transition between twilight and daylight modes
-  match_factor = combined_daytime_brightness(match_elevation + 0.001) / astronomical_twilight_brightness(match_elevation - 0.001);
+  match_factor = combined_daytime_brightness(MATCH_ELEVATION + 0.001) / astronomical_twilight_brightness(MATCH_ELEVATION - 0.001);
   
-  // Calculate the max and min values of the ouput of our curve
+  // Calculate the max and min values of the output of our curve
   for (float elevation = -20; elevation <= 90; elevation += 1) {
       float combined_level = combined_brightness(elevation);
       if (combined_level > max_combined_level) {
@@ -198,11 +213,11 @@ void setup() {
 // *** MAIN LOOP ***
 void loop() {  
   currentMillis = millis();   // capture the latest value of millis()
-  potval = analogRead(pot_pin); // doing this now so I can use the value to check for mode change, and later if I'm in manual mode
-  DEBUG_PRINT(DEBUG_VERBOSE, "Potval at start of loop: ");
-  DEBUG_PRINT(DEBUG_VERBOSE, potval);
-  DEBUG_PRINT(DEBUG_VERBOSE, ".  previousPotval: ");
-  DEBUG_PRINTLN(DEBUG_VERBOSE, previousPotval);
+  potval = analogRead(POT_PIN); // doing this now so I can use the value to check for mode change, and later if I'm in manual mode
+  DEBUG_PRINT(DEBUG_NEVER, "Potval at start of loop: ");
+  DEBUG_PRINT(DEBUG_NEVER, potval);
+  DEBUG_PRINT(DEBUG_NEVER, ".  previousPotval: ");
+  DEBUG_PRINTLN(DEBUG_NEVER, previousPotval);
   
   // Start by looking for a mode change
   readButton(); // looks for mode change switch use
@@ -213,7 +228,7 @@ void loop() {
   }
 
   // Reset the last interaction time if there is any interaction
-  if (potChange > 25 || digitalRead(mode_sw) == LOW) {
+  if (potChange > 25 || digitalRead(MODE_SW) == LOW) {
     lastInteractionTime = currentMillis;
     if (isDimmed) {
       display.ssd1306_command(SSD1306_SETCONTRAST);
@@ -227,16 +242,16 @@ void loop() {
   }
   
   // Dimming logic
-  if ((currentMillis - lastInteractionTime >= dimmingTime) && !isDimmed) {
+  if ((currentMillis - lastInteractionTime >= DIMMING_TIME) && !isDimmed) {
     DEBUG_PRINTLN(DEBUG_INFO, "Dimming OLED now.");
-    uint8_t correctedDimmedBrightness = gammaCorrection(map(dimmedBrightness, 0, 100, 0, 255));
+    uint8_t correctedDimmedBrightness = gammaCorrection(map(DIMMED_BRIGHTNESS, 0, 100, 0, 255));
     display.ssd1306_command(SSD1306_SETCONTRAST);
     display.ssd1306_command(correctedDimmedBrightness);
     isDimmed = true;
   }
 
   // Off timer logic
-  if ((currentMillis - lastInteractionTime >= offTime) && !isOff) {
+  if ((currentMillis - lastInteractionTime >= OFF_TIME) && !isOff) {
     DEBUG_PRINTLN(DEBUG_INFO, "Turning off OLED now.");
     display.clearDisplay();
     display.display();
@@ -281,19 +296,27 @@ void handlePotentiometerMode() {
   led_value16 = gammaCorrection16(mapped_value16);
 
   // Write the corrected values to the LED pins
-  analogWrite(led_pin, led_value);
-  analogWrite16(led_pin16, led_value16);
-
-  // Consolidated and formatted debug output
-  char buffer[120];
-  sprintf(buffer, "Avg: %4d | Mapped 8-bit: %3d | Mapped 16-bit: %5d | LED 8-bit: %3d | LED 16-bit: %5d",
-          average, mapped_value, mapped_value16, led_value, led_value16);
-  DEBUG_PRINTLN(DEBUG_VERBOSE, buffer);
+  analogWrite(LED_PIN, led_value);
+  analogWrite16(LED_PIN16, led_value16);
   
-  // Update OLED content, if necessary, based on timing
+  // Update OLED content and debug, based on timing
   if (currentMillis - previousMillis > 500) { // Only update screen every half second
     previousMillis = currentMillis;
     updateDisplay("Manual Dimming", -1, led_value16);
+    
+    // Consolidated debug output
+    DEBUG_PRINT(DEBUG_VERBOSE, "Potval: ");
+    DEBUG_PRINT(DEBUG_VERBOSE, potval);
+    DEBUG_PRINT(DEBUG_VERBOSE, " | Avg: ");
+    DEBUG_PRINT(DEBUG_VERBOSE, average);
+    DEBUG_PRINT(DEBUG_VERBOSE, " | Mapped 8-bit: ");
+    DEBUG_PRINT(DEBUG_VERBOSE, mapped_value);
+    DEBUG_PRINT(DEBUG_VERBOSE, " | Mapped 16-bit: ");
+    DEBUG_PRINT(DEBUG_VERBOSE, mapped_value16);
+    DEBUG_PRINT(DEBUG_VERBOSE, " | LED 8-bit: ");
+    DEBUG_PRINT(DEBUG_VERBOSE, led_value);
+    DEBUG_PRINT(DEBUG_VERBOSE, " | LED 16-bit: ");
+    DEBUG_PRINTLN(DEBUG_VERBOSE, led_value16);  
   }
   #endif
 }
@@ -301,9 +324,9 @@ void handlePotentiometerMode() {
 // *** Artificial Skylight Mode 1 - Modeled
 void handleSkylightMode1() {
   #if defined(MODE_SKYLIGHT1)
-  if (currentMillis - previousMillis >= skyCheckInterval) {
+  if (currentMillis - previousMillis >= SKY_CHECK_INTERVAL) {
     previousMillis = currentMillis;
-    DEBUG_PRINTLN(DEBUG_INFO, "Mode 1");
+    DEBUG_PRINTLN(DEBUG_INFO, "In Skylight Mode 1");
 
     // Get the sun's current position
     double azimuth, elevation;
@@ -315,60 +338,59 @@ void handleSkylightMode1() {
 
     // Non-linear brightness growth of the sun based on elevation angle
     if (elevation >= 40) {
-      led_value = daylight_value;
+      led_value = DAYLIGHT_VALUE;
       led_value = pow(2, (led_value / relative_brightness));
-      led_value16 = daylight_value16;
+      led_value16 = DAYLIGHT_VALUE16;
       led_value16 = pow(2, (led_value16 / relative_brightness16));
     } else if (elevation >= 15) {
-      led_value = map(elevation * 100, 15 * 100, 40 * 100, .85 * daylight_value, daylight_value);
+      led_value = map(elevation * 100, 15 * 100, 40 * 100, .85 * DAYLIGHT_VALUE, DAYLIGHT_VALUE);
       led_value = pow(2, (led_value / relative_brightness));
-      led_value16 = map(elevation * 100, 15 * 100, 40 * 100, .85 * daylight_value16, daylight_value16);
+      led_value16 = map(elevation * 100, 15 * 100, 40 * 100, .85 * DAYLIGHT_VALUE16, DAYLIGHT_VALUE16);
       led_value16 = pow(2, (led_value16 / relative_brightness16));
     } else if (elevation >= 3) {
-      led_value = map(elevation * 100, 3 * 100, 15 * 100, .76 * daylight_value, .85 * daylight_value);
+      led_value = map(elevation * 100, 3 * 100, 15 * 100, .76 * DAYLIGHT_VALUE, .85 * DAYLIGHT_VALUE);
       led_value = pow(2, (led_value / relative_brightness));
-      led_value16 = map(elevation * 100, 3 * 100, 15 * 100, .76 * daylight_value16, .85 * daylight_value16);
+      led_value16 = map(elevation * 100, 3 * 100, 15 * 100, .76 * DAYLIGHT_VALUE16, .85 * DAYLIGHT_VALUE16);
       led_value16 = pow(2, (led_value16 / relative_brightness16));
     } else if (elevation >= 0) {
-      led_value = map(elevation * 100, 0 * 100, 3 * 100, .7 * daylight_value, .76 * daylight_value);
+      led_value = map(elevation * 100, 0 * 100, 3 * 100, .7 * DAYLIGHT_VALUE, .76 * DAYLIGHT_VALUE);
       led_value = pow(2, (led_value / relative_brightness));
-      led_value16 = map(elevation * 100, 0 * 100, 3 * 100, .7 * daylight_value16, .76 * daylight_value16);
+      led_value16 = map(elevation * 100, 0 * 100, 3 * 100, .7 * DAYLIGHT_VALUE16, .76 * DAYLIGHT_VALUE16);
       led_value16 = pow(2, (led_value16 / relative_brightness16));
     } else if (elevation >= -3) {
-      led_value = map(elevation * 100, -3 * 100, 0 * 100, .6 * daylight_value, .7 * daylight_value);
+      led_value = map(elevation * 100, -3 * 100, 0 * 100, .6 * DAYLIGHT_VALUE, .7 * DAYLIGHT_VALUE);
       led_value = pow(2, (led_value / relative_brightness));
-      led_value16 = map(elevation * 100, -3 * 100, 0 * 100, .6 * daylight_value16, .7 * daylight_value16);
+      led_value16 = map(elevation * 100, -3 * 100, 0 * 100, .6 * DAYLIGHT_VALUE16, .7 * DAYLIGHT_VALUE16);
       led_value16 = pow(2, (led_value16 / relative_brightness16));
-      led_value16 += map(elevation * 100, -3 * 100, 0 * 100, minIllum16, 0);
+      led_value16 += map(elevation * 100, -3 * 100, 0 * 100, MIN_ILLUM16, 0);
     } else if (elevation >= -12) {
-      led_value = map(elevation * 100, -12 * 100, -3 * 100, 0, .6 * daylight_value);
+      led_value = map(elevation * 100, -12 * 100, -3 * 100, 0, .6 * DAYLIGHT_VALUE);
       led_value = pow(2, (led_value / relative_brightness));
-      led_value16 = map(elevation * 100, -12 * 100, -3 * 100, 0, .6 * daylight_value16);
+      led_value16 = map(elevation * 100, -12 * 100, -3 * 100, 0, .6 * DAYLIGHT_VALUE16);
       led_value16 = pow(2, (led_value16 / relative_brightness16));
-      led_value16 += minIllum16;
+      led_value16 += MIN_ILLUM16;
     } else {
       led_value = 0;
       led_value16 = 0;
     }
 
     // Guard rails
-    if (led_value > 0 && led_value < minIllum / 2) led_value = 0; // LED stays off until halfway to minIllum
-    else if (led_value >= minIllum / 2 && led_value < minIllum) led_value = minIllum / 2; // LED turns on halfway
-    if (led_value > daylight_value) led_value = daylight_value;
-    if (led_value16 > 0 && led_value16 < minIllum16 / 2) led_value16 = 0; // LED stays off until halfway to minIllum16
-    else if (led_value16 >= minIllum16 / 2 && led_value16 < minIllum16) led_value16 = minIllum16 / 2; // LED turns on halfway
-    if (led_value16 > daylight_value16) led_value16 = daylight_value16;
+    if (led_value > 0 && led_value < MIN_ILLUM / 2) led_value = 0; // LED stays off until halfway to MIN_ILLUM
+    else if (led_value >= MIN_ILLUM / 2 && led_value < MIN_ILLUM) led_value = MIN_ILLUM / 2; // LED turns on halfway
+    if (led_value > DAYLIGHT_VALUE) led_value = DAYLIGHT_VALUE;
+    if (led_value16 > 0 && led_value16 < MIN_ILLUM16 / 2) led_value16 = 0; // LED stays off until halfway to MIN_ILLUM16
+    else if (led_value16 >= MIN_ILLUM16 / 2 && led_value16 < MIN_ILLUM16) led_value16 = MIN_ILLUM16 / 2; // LED turns on halfway
+    if (led_value16 > DAYLIGHT_VALUE16) led_value16 = DAYLIGHT_VALUE16;
 
     // Write it
-    analogWrite(led_pin, led_value);
-    analogWrite16(led_pin16, led_value16);
-
+    analogWrite(LED_PIN, led_value);
+    analogWrite16(LED_PIN16, led_value16);
     updateDisplay("Skylight Mode 1", elevation, led_value16);
 
-    DEBUG_PRINT(DEBUG_INFO, "LED Value: ");
-    DEBUG_PRINT(DEBUG_INFO, led_value);
-    DEBUG_PRINT(DEBUG_INFO, "   LED Value16: ");
-    DEBUG_PRINTLN(DEBUG_INFO, led_value16);
+    DEBUG_PRINT(DEBUG_VERBOSE, "LED Value: ");
+    DEBUG_PRINT(DEBUG_VERBOSE, led_value);
+    DEBUG_PRINT(DEBUG_VERBOSE, "   LED Value16: ");
+    DEBUG_PRINTLN(DEBUG_VERBOSE, led_value16);
   }
   #endif
 }
@@ -377,7 +399,7 @@ void handleSkylightMode1() {
 #if defined(MODE_SKYLIGHT2)
 // Function to calculate the intensity of direct sunlight based on solar elevation using the Solar Air Mass model
 float direct_sunlight_brightness(float elevation, float I0 = 1361, float k = 0.2) {
-    if (elevation > match_elevation) {
+    if (elevation > MATCH_ELEVATION) {
         float zenith_angle = 90 - elevation;
         float AM = 1 / (cos(radians(zenith_angle)) + 0.50572 * pow((96.07995 - zenith_angle), -1.6364));
         return I0 * exp(-k * AM);
@@ -388,7 +410,7 @@ float direct_sunlight_brightness(float elevation, float I0 = 1361, float k = 0.2
 
 // Function to calculate diffuse sky light using the simplified Perez model
 float diffuse_sky_brightness(float elevation, float a = -1, float b = -0.32, float c = 0.43, float d = 1.25, float e = -0.35) {
-    if (elevation < match_elevation) {
+    if (elevation < MATCH_ELEVATION) {
         return 0;
     } else {
         float zenith_luminance = 100; // Assumed zenith luminance for a typical clear day
@@ -398,11 +420,11 @@ float diffuse_sky_brightness(float elevation, float a = -1, float b = -0.32, flo
 
 // Function to calculate sky brightness during astronomical twilight using an exponential decay model
 float astronomical_twilight_brightness(float elevation) {
-    if (elevation > match_elevation) {
+    if (elevation > MATCH_ELEVATION) {
         return 0; // Daylight, no twilight effect
     } else {
         // Exponential decay of light intensity from sunset to end of astronomical twilight
-        return exp(astronomical_decay_constant * elevation); // Adjust the decay rate to fit observational data
+        return exp(ASTRONOMICAL_DECAY_CONSTANT * elevation); // Adjust the decay rate to fit observational data
     }
 }
 
@@ -410,7 +432,7 @@ float astronomical_twilight_brightness(float elevation) {
 float combined_daytime_brightness(float elevation) {
     float direct_component = direct_sunlight_brightness(elevation);
     float diffuse_component = diffuse_sky_brightness(elevation);
-    return direct_component + (diffuse_component * diffuse_scaling_factor);
+    return direct_component + (diffuse_component * DIFFUSE_SCALING_FACTOR);
 }
 
 // Function to scale and combine the twilight and daylight components
@@ -424,7 +446,7 @@ float combined_brightness(float elevation) {
 // And the main handler for this mode
 void handleSkylightMode2() {
   #if defined(MODE_SKYLIGHT2)
-  if (currentMillis - previousMillis >= skyCheckInterval) {
+  if (currentMillis - previousMillis >= SKY_CHECK_INTERVAL) {
     previousMillis = currentMillis;
     double azimuth, elevation;
     DEBUG_PRINTLN(DEBUG_INFO, "In Skylight Mode 2");
@@ -447,18 +469,22 @@ void handleSkylightMode2() {
     led_value16 = gammaCorrection16(led_value16);
 
     // Guard rails
-    if (led_value > 0 && led_value < minIllum / 2) led_value = 0; // LED stays off until halfway to minIllum
-    else if (led_value >= minIllum / 2 && led_value < minIllum) led_value = minIllum / 2; // LED turns on halfway
-    if (led_value > daylight_value) led_value = daylight_value;
-    if (led_value16 > 0 && led_value16 < minIllum16 / 2) led_value16 = 0; // LED stays off until halfway to minIllum16
-    else if (led_value16 >= minIllum16 / 2 && led_value16 < minIllum16) led_value16 = minIllum16 / 2; // LED turns on halfway
-    if (led_value16 > daylight_value16) led_value16 = daylight_value16;
+    if (led_value > 0 && led_value < MIN_ILLUM / 2) led_value = 0; // LED stays off until halfway to MIN_ILLUM
+    else if (led_value >= MIN_ILLUM / 2 && led_value < MIN_ILLUM) led_value = MIN_ILLUM / 2; // LED turns on halfway
+    if (led_value > DAYLIGHT_VALUE) led_value = DAYLIGHT_VALUE;
+    if (led_value16 > 0 && led_value16 < MIN_ILLUM16 / 2) led_value16 = 0; // LED stays off until halfway to MIN_ILLUM16
+    else if (led_value16 >= MIN_ILLUM16 / 2 && led_value16 < MIN_ILLUM16) led_value16 = MIN_ILLUM16 / 2; // LED turns on halfway
+    if (led_value16 > DAYLIGHT_VALUE16) led_value16 = DAYLIGHT_VALUE16;
     
     // Write it
-    analogWrite(led_pin, led_value);
-    analogWrite16(led_pin16, led_value16);
-
+    analogWrite(LED_PIN, led_value);
+    analogWrite16(LED_PIN16, led_value16);
     updateDisplay("Skylight Mode 2", elevation, led_value16);
+
+    DEBUG_PRINT(DEBUG_VERBOSE, "LED Value: ");
+    DEBUG_PRINT(DEBUG_VERBOSE, led_value);
+    DEBUG_PRINT(DEBUG_VERBOSE, "   LED Value16: ");
+    DEBUG_PRINTLN(DEBUG_VERBOSE, led_value16);
   }
   #endif
 }
@@ -467,19 +493,19 @@ void handleSkylightMode2() {
 void handlePhotoresistorMatchMode() {
   #if defined(MODE_PHOTO_MATCH)
   int photo_int = analogRead(photo_int_pin);
-  int photo_ext = analogRead(photo_ext_pin) + photoOffset;
+  int photo_ext = analogRead(photo_ext_pin) + PHOTO_OFFSET;
   if (photo_int > photo_ext) {
     //float dif;
     //dif = ((float)photo_int - (float)photo_ext) / 1023;
     //led_value16 -= ((int)((float)led_value16 * dif * .05))+1;
     led_value16 = max(led_value16 - 1, 0);
-    //if ((led_value16 > 0) && (led_value16 < minIllum16)) {led_value16 = minIllum16;}
+    //if ((led_value16 > 0) && (led_value16 < MIN_ILLUM16)) {led_value16 = MIN_ILLUM16;}
   } else if (photo_int < photo_ext) {
     //float dif;
     //dif = ((float)photo_ext - (float)photo_int) / 1023;
     //led_value16 += ((int)((float)led_value16 * dif *.05)+1);
     led_value16 = min(led_value16 + 1, 65535);
-    if (led_value16 < minIllum16) led_value16 = minIllum16;
+    if (led_value16 < MIN_ILLUM16) led_value16 = MIN_ILLUM16;
   }
   /*    else if (photo_int == photo_ext) {
     DEBUG_PRINT(DEBUG_VERBOSE, "Matched values! led_value16: ");
@@ -492,7 +518,7 @@ void handlePhotoresistorMatchMode() {
     DEBUG_PRINT(DEBUG_ERROR, led_value16);
   }
   */    
-  analogWrite16(led_pin16, led_value16);
+  analogWrite16(LED_PIN16, led_value16);
 
   // Write status
   if (currentMillis - previousMillis > 250) { // We don't want to print to serial/display at max speed, 4x per second should be fine.
@@ -514,7 +540,6 @@ void handlePhotoresistorMatchMode() {
 
 void handleDemoMode() {
   #if defined(MODE_DEMO)
-  static unsigned long previousOledUpdateMillis = 0; // Static variable to keep track of OLED update timing
   uint16_t previous_led_value16 = led_value16;
   
   // Manage the LED intensity and update timing
@@ -537,22 +562,9 @@ void handleDemoMode() {
   }
 
   // Update PWM outputs to LED
-  analogWrite(led_pin, led_value);
-  analogWrite16(led_pin16, led_value16);
-
-  // Reduce frequency of OLED updates to once every second
-  if (currentMillis - previousOledUpdateMillis > 1000) { // 1000 ms = 1 second
-    previousOledUpdateMillis = currentMillis;
-
-    // Update OLED display
-    updateDisplay("Demo Mode", -1, led_value16);
-
-    // Debugging output
-    DEBUG_PRINT(DEBUG_VERBOSE, "Demo led_value: ");
-    DEBUG_PRINT(DEBUG_VERBOSE, led_value);
-    DEBUG_PRINT(DEBUG_VERBOSE, " - led_value16: ");
-    DEBUG_PRINTLN(DEBUG_VERBOSE, led_value16);
-  }
+  analogWrite(LED_PIN, led_value);
+  analogWrite16(LED_PIN16, led_value16);
+  updateDisplay("Demo Mode", -1, led_value16);
   #endif
 } // End Demo Mode
 
@@ -584,7 +596,6 @@ void initializeEEPROM() {
   }
 }
 
-
 // Code for 16-bit PWM - https://www.codrey.com/arduino-projects/arduino-advanced-16-bit-pwm/
 void setupPWM16() {
   DDRB |= _BV(PB1) | _BV(PB2); //Set pins as outputs 
@@ -592,7 +603,7 @@ void setupPWM16() {
   | _BV(WGM11); // Mode 14: Fast PWM, TOP=ICR1
   TCCR1B = _BV(WGM13) | _BV(WGM12)
   | _BV(CS10); // Prescaler 1
-  ICR1 = icr; // TOP counter value (Relieving OCR1A*)
+  ICR1 = ICR; // TOP counter value (Relieving OCR1A*)
 }
 
 //* 16-bit version of analogWrite(). Only for D9 & D10
@@ -605,119 +616,213 @@ void analogWrite16(uint8_t pin, uint16_t val) {
 
 // Read the momentary mode switch button
 void readButton() {
-  if (digitalRead(mode_sw) == LOW) {
-    if ((millis() - previousButtonMillis) > 400) {
-      previousButtonMillis = millis();
-      
-      // If the display is dimmed or off, restore full brightness and reset timers
-      if (isDimmed || isOff) {
-        lastInteractionTime = millis();
-        display.ssd1306_command(SSD1306_SETCONTRAST);
-        display.ssd1306_command(255);
-        display.display();
-        isDimmed = false;
-        isOff = false;
-      } else {
-        // Cycle through modes, skipping undefined ones
-        do {
-          updateMode((curmode + 1) % 5);
-          #ifndef MODE_POTENTIOMETER
-          if (curmode == 0) continue;
-          #endif
-          #ifndef MODE_SKYLIGHT1
-          if (curmode == 1) continue;
-          #endif
-          #ifndef MODE_SKYLIGHT2
-          if (curmode == 2) continue;
-          #endif
-          #ifndef MODE_PHOTO_MATCH
-          if (curmode == 3) continue;
-          #endif
-          #ifndef MODE_DEMO
-          if (curmode == 4) continue;
-          #endif
-          break;
-        } while (true);
-        
-        previousMillis = 0; // Make sure everything updates right away - reset counters after mode change
-        
-        if (curmode == 0) {
-          DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 0 - Manual Dimming");
-        } else if (curmode == 1) {
-          DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 1 - Skylight Mode 1");
-        } else if (curmode == 2) {
-          DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 2 - Skylight Mode 2");
-        } else if (curmode == 3) {
-          DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 3 - Photo Match");
-        } else if (curmode == 4) {
-          DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 4 - Demo");
-          demoDirectionUp = true;
-          led_value = 0;
-          led_value16 = 0;
-          demoCounter = 256;
-        }
-      }
-    } // End button held long enough to change
-  } // End button currently pressed
-} // End readButton definition
+  static unsigned long buttonPressedTime = 0; // Track when the button was initially pressed
 
-// Every time mode changes, update global varibale and write to EEPROM
+  if (digitalRead(MODE_SW) == LOW) { // Button is pressed
+    if (buttonPressedTime == 0) { // First detection of the button being pressed
+      buttonPressedTime = currentMillis; // Record the time the button was pressed
+        } else if ((currentMillis - buttonPressedTime > 4000)) { // Check for long press
+      enterTimeSettingMode(); // Function to handle long press, enter time setting mode
+            buttonPressedTime = 0; // Reset the timer after handling long press
+            return; // Exit the function to avoid further processing in the same press
+    }
+  } else if (buttonPressedTime != 0) { // Button is not presed, but WAS pressed
+    if ((currentMillis - buttonPressedTime > 25) && (currentMillis - buttonPressedTime <= 4000)) {
+      // Handle normal button press if it was not a long press
+      cycleModes(); // Function to cycle through modes or handle short press functionality
+    }
+    // Reset variables for next button press
+    buttonPressedTime = 0;
+  }
+}
+
+void cycleModes() {
+  // If the display is dimmed or off, restore full brightness and reset timers
+  if (isDimmed || isOff) {
+    lastInteractionTime = currentMillis;
+    display.ssd1306_command(SSD1306_SETCONTRAST);
+    display.ssd1306_command(255);
+    display.display();
+    isDimmed = false;
+    isOff = false;
+  } else {
+    // Cycle through modes, skipping undefined ones
+    do {
+      updateMode((curmode + 1) % 5);
+      #ifndef MODE_POTENTIOMETER
+      if (curmode == 0) continue;
+      #endif
+      #ifndef MODE_SKYLIGHT1
+      if (curmode == 1) continue;
+      #endif
+      #ifndef MODE_SKYLIGHT2
+      if (curmode == 2) continue;
+      #endif
+      #ifndef MODE_PHOTO_MATCH
+      if (curmode == 3) continue;
+      #endif
+      #ifndef MODE_DEMO
+      if (curmode == 4) continue;
+      #endif
+      break;
+    } while (true);
+    previousMillis = 0; // Reset timing to ensure immediate mode update        
+    
+    // New mode dependent actions
+    if (curmode == 0) {
+      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 0 - Manual Dimming");
+    } else if (curmode == 1) {
+      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 1 - Skylight Mode 1");
+    } else if (curmode == 2) {
+      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 2 - Skylight Mode 2");
+    } else if (curmode == 3) {
+      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 3 - Photo Match");
+    } else if (curmode == 4) {
+      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 4 - Demo");
+      demoDirectionUp = true;
+      led_value = 0;
+      led_value16 = 0;
+      demoCounter = 255;
+    } 
+  } // End cycle through modes
+} // End cycleModes definition
+
+// Every time mode changes, update global variable and write to EEPROM
 void updateMode(uint8_t newmode) {
   curmode = newmode % 5;  // This ensures mode is always between 0 and 4
-  if (curmode != newmode) {
+  /*if (curmode != newmode) {
     DEBUG_PRINT(DEBUG_ERROR, "Invalid new mode sent to the updateMode function: ");
     DEBUG_PRINTLN(DEBUG_ERROR, newmode);
-  }
-  EEPROM.update(ADDR_MODE, curmode);  // Save the mode  // Save new mode to EEPROM whenever it changes
+  }*/
+  EEPROM.update(ADDR_MODE, curmode);  // Save new mode to EEPROM whenever it changes
+}
+
+// When entering time setting mode, wait for user to set the potentiometer to approximate center before proceeding. 
+void enterTimeSettingMode() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Set Time Mode");
+  display.println("Adjust to middle to begin.");
+  display.display();
+
+  // Wait for user to adjust potentiometer to middle
+  int potValue = 0;
+  do {
+    potValue = analogRead(POT_PIN);
+    delay(100);
+  } while (abs(potValue - 512) > 50); // Assume middle is around 512 in a 0-1023 range
+
+  // Now adjust time
+  adjustTimeWithPot();
+}
+
+// Adjust time in a few different speeds based on movement up or down from center
+void adjustTimeWithPot() {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    DateTime now = rtc.now(); // Assuming you have set up your RTC
+    int lastPotValue = analogRead(POT_PIN);
+
+    while (!digitalRead(MODE_SW)) { // Exit loop when button is pressed again
+        int potValue = analogRead(POT_PIN);
+        int delta = potValue - lastPotValue;
+
+        if (abs(delta) > 10) { // To avoid too sensitive adjustments
+            if (delta > 0) {
+                now = now + TimeSpan(0, 0, delta / 10, 0); // Faster as delta increases
+            } else {
+                now = now - TimeSpan(0, 0, -delta / 10, 0); // Faster as delta decreases
+            }
+
+            rtc.adjust(now); // Set new time to RTC
+            displayTimeSetting(now);
+            lastPotValue = potValue;
+        }
+        delay(100);
+    }
+}
+
+// Function to display the current time in a specific format on the OLED
+void displayTimeSetting(const DateTime &now) {
+    char buffer[32]; // Enough to handle all characters
+    int hour = now.hour();
+    char am_pm[] = "AM";
+    if (hour == 0) {
+        hour = 12; // Midnight case
+    } else if (hour == 12) {
+        strcpy(am_pm, "PM"); // Noon case
+    } else if (hour > 12) {
+        hour -= 12;
+        strcpy(am_pm, "PM");
+    }
+
+    snprintf(buffer, sizeof(buffer), "Set Time Mode\n%02d:%02d %s", hour, now.minute(), am_pm);
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print(buffer);
+    display.display();
 }
 
 // Updates to the OLED display
 void updateDisplay(const char* mode, float elevation, uint16_t led_value16) {
-    // If the display is supposed to be off, skip updating the display
-    if (isOff) {
-        return;
-    }
+  // If the display is supposed to be off, or it has already been updated recently, skip updating the display
+  if ((currentMillis - lastOledUpdateMillis) < OLED_UPDATE_INTERVAL || isOff) {
+    return;
+  }
+  lastOledUpdateMillis = currentMillis; // Update the last update time
 
-    // Start with the current mode on the first row
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.println(mode);
+  // Start with the current mode on the first row
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(mode);
+  display.setCursor(0, display.getCursorY() + 2); // Little extra space between lines
+
+  // Always display elevation in Skylight modes
+  if (strcmp(mode, "Skylight Mode 1") == 0 || strcmp(mode, "Skylight Mode 2") == 0) {
+    display.print("Elevation: ");
+    display.print(elevation, 1); // Print elevation with one decimal place
+    display.write(248); // Degree symbol
+    display.println();
     display.setCursor(0, display.getCursorY() + 2); // Little extra space between lines
+  }
 
-    // Always display elevation in Skylight modes
-    if (strcmp(mode, "Skylight Mode 1") == 0 || strcmp(mode, "Skylight Mode 2") == 0) {
-        display.print("Elevation: ");
-        display.print(elevation, 1); // Print elevation with one decimal place
-        display.write(248); // Degree symbol
-        display.println();
-        display.setCursor(0, display.getCursorY() + 2); // Little extra space between lines
-    }
+  // Calculate brightness percentage from led_value16
+  int percent = map(led_value16, 0, 65535, 0, 100);
+  display.print("Brightness: ");
+  display.print(percent);
+  display.println("%");
+  display.setCursor(0, display.getCursorY() + 2); // Little extra space between lines
+  
+  // Add raw led_value16 in Demo mode
+  if (strcmp(mode, "Demo Mode") == 0) {
+    display.print("Raw 16-bit: ");
+    display.println(led_value16);
+  }
 
-    // Calculate brightness percentage from led_value16
-    int percent = map(led_value16, 0, 65535, 0, 100);
-    display.print("Brightness: ");
-    display.print(percent);
-    display.println("%");
-    display.setCursor(0, display.getCursorY() + 2); // Little extra space between lines
-    
-    // Add raw led_value16 in Demo mode
-    if (strcmp(mode, "Demo Mode") == 0) {
-        display.print("Raw 16-bit: ");
-        display.println(led_value16);
-    }
-
-    // Display current time bottom-right aligned
+  // Display current time bottom-right aligned only in Skylight modes
+  if (strcmp(mode, "Skylight Mode 1") == 0 || strcmp(mode, "Skylight Mode 2") == 0) {
     DateTime now = rtc.now();
-    char timeString[9]; // "HH:MM:SS"
-    sprintf(timeString, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(timeString, 0, 0, &x1, &y1, &w, &h);  // Calculate the width and height of the time string
-    display.setCursor(SCREEN_WIDTH - w - 1, SCREEN_HEIGHT - h); // Position the cursor for right alignment at the bottom
-    display.print(timeString);
-    
-    // Done
-    display.display();
+    char timeString[9]; // "HH:MM AM/PM"
+    int hour = now.hour();
+    String am_pm = "AM";
+    if (hour == 0) {
+        hour = 12;  // Midnight case
+    } else if (hour == 12) {
+        am_pm = "PM"; // Noon case
+    } else if (hour > 12) {
+        hour -= 12;
+        am_pm = "PM";
+    }
+    sprintf(timeString, "%02d:%02d %s", hour, now.minute(), am_pm.c_str());
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(timeString, 0, 0, &x1, &y1, &w, &h);  // Calculate the width and height of the time string
+  display.setCursor(SCREEN_WIDTH - w - 1, SCREEN_HEIGHT - h); // Position the cursor for right alignment at the bottom
+  display.print(timeString);
+  }
+  
+  // Done
+  display.display();
 }
 
 // LED Gamma Correction Curve
