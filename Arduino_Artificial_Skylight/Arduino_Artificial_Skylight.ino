@@ -30,14 +30,14 @@ const float longitude = -84.54894616203148; // Hardcode your current location fo
 #define DIMMED_BRIGHTNESS 5                 // OLED dimmed brightness as a percentage (5%)
 #define OFF_TIME 300000                     // OLED Off time in milliseconds (5 minutes)
 #define SKY_CHECK_INTERVAL 10000            // Used in mode 1&2 - only update skylight every xx milliseconds
-#define OLED_UPDATE_INTERVAL 250            // Milliseconds between OLED display updates
+#define OLED_UPDATE_INTERVAL 500            // Milliseconds between OLED display updates
 
 // Enabled Modes
 #define MODE_POTENTIOMETER                  // Only include the modes you want available
 #define MODE_SKYLIGHT1
 #define MODE_SKYLIGHT2
 //#define MODE_PHOTO_MATCH
-#define MODE_DEMO
+//#define MODE_DEMO
 
 // Pin Designations
 #define LED_PIN 11
@@ -61,7 +61,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define DEBUG_VERBOSE 4
 #define DEBUG_NEVER 9 // This is really only a placeholder. If you want to see this information, change the debug level on the specific line of code from NEVER to something else.
 
-#define DEBUG_LEVEL DEBUG_WARNING          // Set the debug level here
+#define DEBUG_LEVEL DEBUG_WARNING       // Set the debug level here
 
 #define DEBUG_PRINT(level, message) \
     do { if (DEBUG_LEVEL >= level) Serial.print(message); } while (0)
@@ -124,11 +124,11 @@ uint8_t demoCounter = 255;              // Used in mode 4 - increment the 8-bit 
 #endif
 
 // Function Prototypes
-void handlePotentiometerMode();
-void handleSkylightMode1();
-void handleSkylightMode2();
-void handlePhotoresistorMatchMode();
-void handleDemoMode();
+void handlePotentiometerMode(bool forceUpdate = false);
+void handleSkylightMode1(bool forceUpdate = false);
+void handleSkylightMode2(bool forceUpdate = false);
+void handlePhotoresistorMatchMode(bool forceUpdate = false);
+void handleDemoMode(bool forceUpdate = false);
 unsigned long getNextDemoInterval(uint16_t led_value16, bool goingUp);
 void initializeEEPROM();
 void setupPWM16();
@@ -138,7 +138,7 @@ void cycleModes();
 void enterTimeSettingMode();
 void adjustTimeWithPot();
 void displayTimeSetting(const DateTime &now);
-void updateDisplay(const char* mode, float elevation, uint16_t led_value16);
+void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool forceUpdate = false);
 uint8_t gammaCorrection(uint8_t led_value, float gamma = 2.2);
 uint16_t gammaCorrection16(uint16_t led_value16, float gamma = 2.2);
 
@@ -175,11 +175,12 @@ void setup() {
   display.ssd1306_command(SSD1306_SETCONTRAST);
   display.ssd1306_command(255); // Set initial brightness to 100%
   
-  // Debounce array init for MODE_POTENTIOMETER
+  // Used in MODE_POTENTIOMETER
   #if defined(MODE_POTENTIOMETER)
-  for (int thisReading = 0; thisReading < AVERAGE_BUFFER_SIZE; thisReading++) {
-    potReadings[thisReading] = 0;
+  for (int thisReading = 0; thisReading < AVERAGE_BUFFER_SIZE; thisReading++) { // Init Debounce Array
+    potReadings[thisReading] = 0; 
   }
+  previousPotval = analogRead(POT_PIN); // So we don't immediately switch to manual on first run.
   #endif
 
   // Used in Skylight Mode 1 - Linear LED Brightness
@@ -212,20 +213,24 @@ void setup() {
 // *** MAIN LOOP ***
 void loop() {  
   currentMillis = millis();   // capture the latest value of millis()
-  potval = analogRead(POT_PIN); // doing this now so I can use the value to check for mode change, and later if I'm in manual mode
-  DEBUG_PRINT(DEBUG_NEVER, "Potval at start of loop: ");
-  DEBUG_PRINT(DEBUG_NEVER, potval);
-  DEBUG_PRINT(DEBUG_NEVER, ".  previousPotval: ");
-  DEBUG_PRINTLN(DEBUG_NEVER, previousPotval);
   
   // Start by looking for a mode change
   readButton(); // looks for mode change switch use
+  
+  // Potential mode change through potentiometer 
+  #if defined(MODE_POTENTIOMETER)
+  potval = analogRead(POT_PIN); // doing this now so I can use the value to check for mode change, and later if I'm in manual mode
   int potChange = abs(potval - previousPotval);
-  if (potChange > 50) {
+  if (curmode != 0 && potChange > 50) {
     curmode = 0; // Dimmer moved - switch to manual dimming mode
+    previousMillis = 0; // Always reset on mode change
+    DEBUG_PRINTLN(DEBUG_WARNING, "Manual Overide - Entering mode 0 - Manual Dimming");
     EEPROM.update(ADDR_MODE, curmode);  // Save new mode to EEPROM whenever it changes
     previousPotval = potval;
   }
+  #else 
+  int potChange = 0;
+  #endif 
 
   // Reset the last interaction time if there is any interaction
   if (potChange > 25 || digitalRead(MODE_SW) == LOW) {
@@ -278,7 +283,7 @@ void loop() {
 }
 
 // Basic manual dimmer mode with gamma correction
-void handlePotentiometerMode() {
+void handlePotentiometerMode(bool forceUpdate) {
   #if defined(MODE_POTENTIOMETER)
   // Debounce
   total = total - potReadings[readIndex];            // Subtract the oldest reading from the total
@@ -298,10 +303,10 @@ void handlePotentiometerMode() {
   // Write the corrected values to the LED pins
   analogWrite(LED_PIN, led_value);
   analogWrite16(LED_PIN16, led_value16);
-  updateDisplay("Manual Dimming", -1, led_value16);
+  updateDisplay("Manual Dimming", -1, led_value16, forceUpdate);
 
   // Update debug, based on timing
-  if (currentMillis - previousMillis > 500) { // Only debug every half second
+  if (currentMillis - previousMillis > 500 || forceUpdate == true) { // Only debug every half second
     previousMillis = currentMillis;
     
     // Consolidated debug output
@@ -322,9 +327,9 @@ void handlePotentiometerMode() {
 }
 
 // *** Artificial Skylight Mode 1 - Modeled
-void handleSkylightMode1() {
+void handleSkylightMode1(bool forceUpdate) {
   #if defined(MODE_SKYLIGHT1)
-  if (currentMillis - previousMillis >= SKY_CHECK_INTERVAL) {
+  if (currentMillis - previousMillis >= SKY_CHECK_INTERVAL || forceUpdate == true) {
     previousMillis = currentMillis;
     DEBUG_PRINTLN(DEBUG_INFO, "In Skylight Mode 1");
 
@@ -385,7 +390,7 @@ void handleSkylightMode1() {
     // Write it
     analogWrite(LED_PIN, led_value);
     analogWrite16(LED_PIN16, led_value16);
-    updateDisplay("Skylight Mode 1", elevation, led_value16);
+    updateDisplay("Skylight Mode 1", elevation, led_value16, forceUpdate);
 
     DEBUG_PRINT(DEBUG_VERBOSE, "LED Value: ");
     DEBUG_PRINT(DEBUG_VERBOSE, led_value);
@@ -444,9 +449,9 @@ float combined_brightness(float elevation) {
 #endif
 
 // And the main handler for this mode
-void handleSkylightMode2() {
+void handleSkylightMode2(bool forceUpdate) {
   #if defined(MODE_SKYLIGHT2)
-  if (currentMillis - previousMillis >= SKY_CHECK_INTERVAL) {
+  if (currentMillis - previousMillis >= SKY_CHECK_INTERVAL || forceUpdate == true) {
     previousMillis = currentMillis;
     double azimuth, elevation;
     DEBUG_PRINTLN(DEBUG_INFO, "In Skylight Mode 2");
@@ -479,7 +484,7 @@ void handleSkylightMode2() {
     // Write it
     analogWrite(LED_PIN, led_value);
     analogWrite16(LED_PIN16, led_value16);
-    updateDisplay("Skylight Mode 2", elevation, led_value16);
+    updateDisplay("Skylight Mode 2", elevation, led_value16, forceUpdate);
 
     DEBUG_PRINT(DEBUG_VERBOSE, "LED Value: ");
     DEBUG_PRINT(DEBUG_VERBOSE, led_value);
@@ -490,7 +495,7 @@ void handleSkylightMode2() {
 }
 
 // Photo Matching Mode
-void handlePhotoresistorMatchMode() {
+void handlePhotoresistorMatchMode(bool forceUpdate) {
   #if defined(MODE_PHOTO_MATCH)
   int photo_int = analogRead(photo_int_pin);
   int photo_ext = analogRead(photo_ext_pin) + PHOTO_OFFSET;
@@ -519,10 +524,10 @@ void handlePhotoresistorMatchMode() {
   }
   */    
   analogWrite16(LED_PIN16, led_value16);
-  updateDisplay("Brightness Match", -1, led_value16);
+  updateDisplay("Brightness Match", -1, led_value16, forceUpdate);
 
   // Write status
-  if (currentMillis - previousMillis > 250) { // We don't want to print to serial/display at max speed, 4x per second should be fine.
+  if (currentMillis - previousMillis > 250 || forceUpdate == true) { // We don't want to print to serial/display at max speed, 4x per second should be fine.
     previousMillis = currentMillis;
     DEBUG_PRINT(DEBUG_VERBOSE, "---Status--- led_value16: ");
     DEBUG_PRINT(DEBUG_VERBOSE, led_value16);
@@ -534,9 +539,14 @@ void handlePhotoresistorMatchMode() {
   #endif
 }
 
-void handleDemoMode() {
+void handleDemoMode(bool forceUpdate) {
   #if defined(MODE_DEMO)
-  uint16_t previous_led_value16 = led_value16;
+  if (forceUpdate == true) {
+    demoDirectionUp = true;
+    led_value = 0;
+    led_value16 = 0;
+    demoCounter = 255;
+  }
   
   // Manage the LED intensity and update timing
   if (demoDirectionUp) {
@@ -560,7 +570,7 @@ void handleDemoMode() {
   // Update PWM outputs to LED
   analogWrite(LED_PIN, led_value);
   analogWrite16(LED_PIN16, led_value16);
-  updateDisplay("Demo Mode", -1, led_value16);
+  updateDisplay("Demo Mode", -1, led_value16, forceUpdate);
   #endif
 } // End Demo Mode
 
@@ -670,18 +680,21 @@ void cycleModes() {
     // New mode dependent actions
     if (curmode == 0) {
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 0 - Manual Dimming");
+      handlePotentiometerMode(true);
     } else if (curmode == 1) {
+      handleSkylightMode1(true);
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 1 - Skylight Mode 1");
     } else if (curmode == 2) {
+      handleSkylightMode2(true);
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 2 - Skylight Mode 2");
     } else if (curmode == 3) {
+      handlePhotoresistorMatchMode(true);
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 3 - Photo Match");
     } else if (curmode == 4) {
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 4 - Demo");
-      demoDirectionUp = true;
-      led_value = 0;
-      led_value16 = 0;
-      demoCounter = 255;
+      #if defined(MODE_DEMO)      
+      handleDemoMode(true);
+      #endif
     } 
   } // End cycle through modes
 } // End cycleModes definition
@@ -716,12 +729,14 @@ void adjustTimeWithPot() {
     int potValue = analogRead(POT_PIN);
     int delta = potValue - 512;
 
-    if (abs(delta) > 30 && abs(delta) < 60) { // To avoid too sensitive adjustments
-      now = now + TimeSpan(0, 0, 0, delta); // 30-60 seconds per iteration
-    } else if (abs(delta) >= 60 && abs(delta) < 480) { // lets move a little quicker
-      now = now + TimeSpan(0, 0, delta / 30, 0); // 2-8 minutes per iteration
-    } else if (abs(delta) >= 480) { // Fly - this is at the extremes of our analog read values - some POTs may not even be able to produce this value.
-      now = now + TimeSpan(0, delta / 480, 0, 0); // an hour per iteration
+    if (abs(delta) > 30 && abs(delta) < 60) {            // To avoid too sensitive adjustments
+      now = now + TimeSpan(0, 0, 0, delta/5);               // 6-12 seconds per iteration
+    } else if (abs(delta) >= 60 && abs(delta) < 240) {   // lets move a little quicker
+      now = now + TimeSpan(0, 0, delta / 60, 0);            // 1-4 minutes per iteration
+    } else if (abs(delta) >= 240 && abs(delta) < 480) {  // even quicker
+      now = now + TimeSpan(0, 0, delta / 24, 0);            // 10-20 minutes per iteration
+    } else if (abs(delta) >= 480) {                      // Fly - this is at the extremes of our analog read values - some POTs may not even be able to produce this value.
+      now = now + TimeSpan(0, delta / 480, 0, 0);           // an hour per iteration
     }
     displayTimeSetting(now);
     delay(100);
@@ -752,10 +767,12 @@ void displayTimeSetting(const DateTime &now) {
 }
 
 // Updates to the OLED display
-void updateDisplay(const char* mode, float elevation, uint16_t led_value16) {
+void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool forceUpdate) {
   // If the display is supposed to be off, or it has already been updated recently, skip updating the display
   if ((currentMillis - lastOledUpdateMillis) < OLED_UPDATE_INTERVAL || isOff) {
-    return;
+    if (forceUpdate == false) { // Unless force update was selected
+      return;
+    }
   }
   lastOledUpdateMillis = currentMillis; // Update the last update time
 
