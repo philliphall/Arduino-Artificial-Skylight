@@ -30,7 +30,7 @@ const float longitude = -84.54894616203148; // Hardcode your current location fo
 #define DIMMED_BRIGHTNESS 5                 // OLED dimmed brightness as a percentage (5%)
 #define OFF_TIME 300000                     // OLED Off time in milliseconds (5 minutes)
 #define SKY_CHECK_INTERVAL 10000            // Used in mode 1&2 - only update skylight every xx milliseconds
-#define OLED_UPDATE_INTERVAL 500            // Milliseconds between OLED display updates
+#define OLED_UPDATE_INTERVAL 250            // Milliseconds between OLED display updates
 
 // Enabled Modes
 #define MODE_POTENTIOMETER                  // Only include the modes you want available
@@ -61,7 +61,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define DEBUG_VERBOSE 4
 #define DEBUG_NEVER 9 // This is really only a placeholder. If you want to see this information, change the debug level on the specific line of code from NEVER to something else.
 
-#define DEBUG_LEVEL DEBUG_WARNING       // Set the debug level here
+#define DEBUG_LEVEL DEBUG_WARNING          // Set the debug level here
 
 #define DEBUG_PRINT(level, message) \
     do { if (DEBUG_LEVEL >= level) Serial.print(message); } while (0)
@@ -76,7 +76,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // Global Scope Declarations
 unsigned long currentMillis = 0;        // stores the value of millis() in each iteration of loop()
 unsigned long previousMillis = 0;       // for various timings - mode dependent
-unsigned long lastInteractionTime = 0;  // Global variable to track the last interaction time for OLED dimming
+unsigned long lastInteractionMillis = 0;// Global variable to track the last interaction time for OLED dimming
 unsigned long lastOledUpdateMillis = 0; // Global variable to limit OLED updates
 uint8_t curmode = 0;                    // 0-Manual, 1-Skylight1, 2-Skylight2, 3-PhotoMatch, 4-Demo
 uint8_t led_value = 10;                 // This will be the dynamic LED brightness sent to PWM
@@ -135,7 +135,6 @@ void setupPWM16();
 void analogWrite16(uint8_t pin, uint16_t val);
 void readButton();
 void cycleModes();
-void updateMode(uint8_t curmode);
 void enterTimeSettingMode();
 void adjustTimeWithPot();
 void displayTimeSetting(const DateTime &now);
@@ -204,7 +203,7 @@ void setup() {
   #endif
 
   // Track initial interaction time
-  lastInteractionTime = millis();
+  lastInteractionMillis = millis();
 
   Serial.println("Ending Setup()");
   Serial.flush();
@@ -223,13 +222,14 @@ void loop() {
   readButton(); // looks for mode change switch use
   int potChange = abs(potval - previousPotval);
   if (potChange > 50) {
-    updateMode(0);
+    curmode = 0; // Dimmer moved - switch to manual dimming mode
+    EEPROM.update(ADDR_MODE, curmode);  // Save new mode to EEPROM whenever it changes
     previousPotval = potval;
   }
 
   // Reset the last interaction time if there is any interaction
   if (potChange > 25 || digitalRead(MODE_SW) == LOW) {
-    lastInteractionTime = currentMillis;
+    lastInteractionMillis = currentMillis;
     if (isDimmed) {
       display.ssd1306_command(SSD1306_SETCONTRAST);
       display.ssd1306_command(255);
@@ -242,7 +242,7 @@ void loop() {
   }
   
   // Dimming logic
-  if ((currentMillis - lastInteractionTime >= DIMMING_TIME) && !isDimmed) {
+  if ((currentMillis - lastInteractionMillis >= DIMMING_TIME) && !isDimmed) {
     DEBUG_PRINTLN(DEBUG_INFO, "Dimming OLED now.");
     uint8_t correctedDimmedBrightness = gammaCorrection(map(DIMMED_BRIGHTNESS, 0, 100, 0, 255));
     display.ssd1306_command(SSD1306_SETCONTRAST);
@@ -251,7 +251,7 @@ void loop() {
   }
 
   // Off timer logic
-  if ((currentMillis - lastInteractionTime >= OFF_TIME) && !isOff) {
+  if ((currentMillis - lastInteractionMillis >= OFF_TIME) && !isOff) {
     DEBUG_PRINTLN(DEBUG_INFO, "Turning off OLED now.");
     display.clearDisplay();
     display.display();
@@ -298,11 +298,11 @@ void handlePotentiometerMode() {
   // Write the corrected values to the LED pins
   analogWrite(LED_PIN, led_value);
   analogWrite16(LED_PIN16, led_value16);
-  
-  // Update OLED content and debug, based on timing
-  if (currentMillis - previousMillis > 500) { // Only update screen every half second
+  updateDisplay("Manual Dimming", -1, led_value16);
+
+  // Update debug, based on timing
+  if (currentMillis - previousMillis > 500) { // Only debug every half second
     previousMillis = currentMillis;
-    updateDisplay("Manual Dimming", -1, led_value16);
     
     // Consolidated debug output
     DEBUG_PRINT(DEBUG_VERBOSE, "Potval: ");
@@ -519,6 +519,7 @@ void handlePhotoresistorMatchMode() {
   }
   */    
   analogWrite16(LED_PIN16, led_value16);
+  updateDisplay("Brightness Match", -1, led_value16);
 
   // Write status
   if (currentMillis - previousMillis > 250) { // We don't want to print to serial/display at max speed, 4x per second should be fine.
@@ -529,11 +530,6 @@ void handlePhotoresistorMatchMode() {
     DEBUG_PRINT(DEBUG_VERBOSE, photo_ext);
     DEBUG_PRINT(DEBUG_VERBOSE, ", photo_int: ");
     DEBUG_PRINTLN(DEBUG_VERBOSE, photo_int);
-
-    // Write OLED Content
-    if (photo_ext > 999) photo_ext = 999; // Don't want to reserve another digit for the rare possibility of reaching max 1023, but need to protect from buffer overrun.
-    if (photo_int > 999) photo_int = 999;
-    updateDisplay("Brightness Match", -1, led_value16);
   }
   #endif
 }
@@ -630,6 +626,7 @@ void readButton() {
     if ((currentMillis - buttonPressedTime > 25) && (currentMillis - buttonPressedTime <= 4000)) {
       // Handle normal button press if it was not a long press
       cycleModes(); // Function to cycle through modes or handle short press functionality
+      previousMillis = 0; // Redundant, but I can't figure why this isn't being respected in cycleModes
     }
     // Reset variables for next button press
     buttonPressedTime = 0;
@@ -637,9 +634,11 @@ void readButton() {
 }
 
 void cycleModes() {
+  previousMillis = 0; // Reset timing to ensure immediate mode update        
+
   // If the display is dimmed or off, restore full brightness and reset timers
   if (isDimmed || isOff) {
-    lastInteractionTime = currentMillis;
+    lastInteractionMillis = currentMillis;
     display.ssd1306_command(SSD1306_SETCONTRAST);
     display.ssd1306_command(255);
     display.display();
@@ -648,7 +647,8 @@ void cycleModes() {
   } else {
     // Cycle through modes, skipping undefined ones
     do {
-      updateMode((curmode + 1) % 5);
+      curmode = (curmode + 1) % 5;
+      EEPROM.update(ADDR_MODE, curmode);  // Save new mode to EEPROM whenever it changes
       #ifndef MODE_POTENTIOMETER
       if (curmode == 0) continue;
       #endif
@@ -666,19 +666,18 @@ void cycleModes() {
       #endif
       break;
     } while (true);
-    previousMillis = 0; // Reset timing to ensure immediate mode update        
     
     // New mode dependent actions
     if (curmode == 0) {
-      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 0 - Manual Dimming");
+      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 0 - Manual Dimming");
     } else if (curmode == 1) {
-      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 1 - Skylight Mode 1");
+      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 1 - Skylight Mode 1");
     } else if (curmode == 2) {
-      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 2 - Skylight Mode 2");
+      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 2 - Skylight Mode 2");
     } else if (curmode == 3) {
-      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 3 - Photo Match");
+      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 3 - Photo Match");
     } else if (curmode == 4) {
-      //DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 4 - Demo");
+      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 4 - Demo");
       demoDirectionUp = true;
       led_value = 0;
       led_value16 = 0;
@@ -686,16 +685,6 @@ void cycleModes() {
     } 
   } // End cycle through modes
 } // End cycleModes definition
-
-// Every time mode changes, update global variable and write to EEPROM
-void updateMode(uint8_t newmode) {
-  curmode = newmode % 5;  // This ensures mode is always between 0 and 4
-  /*if (curmode != newmode) {
-    DEBUG_PRINT(DEBUG_ERROR, "Invalid new mode sent to the updateMode function: ");
-    DEBUG_PRINTLN(DEBUG_ERROR, newmode);
-  }*/
-  EEPROM.update(ADDR_MODE, curmode);  // Save new mode to EEPROM whenever it changes
-}
 
 // When entering time setting mode, wait for user to set the potentiometer to approximate center before proceeding. 
 void enterTimeSettingMode() {
@@ -710,7 +699,7 @@ void enterTimeSettingMode() {
   do {
     potValue = analogRead(POT_PIN);
     delay(100);
-  } while (abs(potValue - 512) > 50); // Assume middle is around 512 in a 0-1023 range
+  } while (abs(potValue - 512) > 25); // Assume middle is around 512 in a 0-1023 range
 
   // Now adjust time
   adjustTimeWithPot();
@@ -718,49 +707,48 @@ void enterTimeSettingMode() {
 
 // Adjust time in a few different speeds based on movement up or down from center
 void adjustTimeWithPot() {
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    DateTime now = rtc.now(); // Assuming you have set up your RTC
-    int lastPotValue = analogRead(POT_PIN);
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  DateTime now = rtc.now(); // Assuming you have set up your RTC
+  displayTimeSetting(now);
 
-    while (!digitalRead(MODE_SW)) { // Exit loop when button is pressed again
-        int potValue = analogRead(POT_PIN);
-        int delta = potValue - lastPotValue;
+  while (digitalRead(MODE_SW) == HIGH) { // Exit loop when button is pressed again
+    int potValue = analogRead(POT_PIN);
+    int delta = potValue - 512;
 
-        if (abs(delta) > 10) { // To avoid too sensitive adjustments
-            if (delta > 0) {
-                now = now + TimeSpan(0, 0, delta / 10, 0); // Faster as delta increases
-            } else {
-                now = now - TimeSpan(0, 0, -delta / 10, 0); // Faster as delta decreases
-            }
-
-            rtc.adjust(now); // Set new time to RTC
-            displayTimeSetting(now);
-            lastPotValue = potValue;
-        }
-        delay(100);
+    if (abs(delta) > 30 && abs(delta) < 60) { // To avoid too sensitive adjustments
+      now = now + TimeSpan(0, 0, 0, delta); // 30-60 seconds per iteration
+    } else if (abs(delta) >= 60 && abs(delta) < 480) { // lets move a little quicker
+      now = now + TimeSpan(0, 0, delta / 30, 0); // 2-8 minutes per iteration
+    } else if (abs(delta) >= 480) { // Fly - this is at the extremes of our analog read values - some POTs may not even be able to produce this value.
+      now = now + TimeSpan(0, delta / 480, 0, 0); // an hour per iteration
     }
+    displayTimeSetting(now);
+    delay(100);
+  } // Button has been pressed again
+  rtc.adjust(now); // Save the new time to RTC
+  previousMillis = 0; // Reset previousMillis so whatever mode we are returning to updates the display.
 }
 
 // Function to display the current time in a specific format on the OLED
 void displayTimeSetting(const DateTime &now) {
-    char buffer[32]; // Enough to handle all characters
-    int hour = now.hour();
-    char am_pm[] = "AM";
-    if (hour == 0) {
-        hour = 12; // Midnight case
-    } else if (hour == 12) {
-        strcpy(am_pm, "PM"); // Noon case
-    } else if (hour > 12) {
-        hour -= 12;
-        strcpy(am_pm, "PM");
-    }
+  char buffer[32]; // Enough to handle all characters
+  int hour = now.hour();
+  char am_pm[] = "AM";
+  if (hour == 0) {
+    hour = 12; // Midnight case
+  } else if (hour == 12) {
+    strcpy(am_pm, "PM"); // Noon case
+  } else if (hour > 12) {
+    hour -= 12;
+    strcpy(am_pm, "PM");
+  }
 
-    snprintf(buffer, sizeof(buffer), "Set Time Mode\n%02d:%02d %s", hour, now.minute(), am_pm);
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.print(buffer);
-    display.display();
+  snprintf(buffer, sizeof(buffer), "Set Time Mode\n%02d:%02d %s", hour, now.minute(), am_pm);
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print(buffer);
+  display.display();
 }
 
 // Updates to the OLED display
@@ -775,51 +763,49 @@ void updateDisplay(const char* mode, float elevation, uint16_t led_value16) {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println(mode);
-  display.setCursor(0, display.getCursorY() + 2); // Little extra space between lines
-
-  // Always display elevation in Skylight modes
-  if (strcmp(mode, "Skylight Mode 1") == 0 || strcmp(mode, "Skylight Mode 2") == 0) {
-    display.print("Elevation: ");
-    display.print(elevation, 1); // Print elevation with one decimal place
-    display.write(248); // Degree symbol
-    display.println();
-    display.setCursor(0, display.getCursorY() + 2); // Little extra space between lines
-  }
+  display.setCursor(0, display.getCursorY() + 1); // Little extra space between lines
 
   // Calculate brightness percentage from led_value16
   int percent = map(led_value16, 0, 65535, 0, 100);
   display.print("Brightness: ");
   display.print(percent);
   display.println("%");
-  display.setCursor(0, display.getCursorY() + 2); // Little extra space between lines
+  display.setCursor(0, display.getCursorY() + 1); // Little extra space between lines
+
+  // Display elevation in Skylight modes
+  if (curmode == 1 || curmode == 2) {
+    display.print("Ele: ");
+    display.print(elevation, 1); // Print elevation with one decimal place
+    display.write(248); // Degree symbol
+    display.println();
+    display.setCursor(0, display.getCursorY() + 1); // Little extra space between lines
+  }
   
   // Add raw led_value16 in Demo mode
-  if (strcmp(mode, "Demo Mode") == 0) {
+  if (curmode == 4) {
     display.print("Raw 16-bit: ");
     display.println(led_value16);
   }
 
-  // Display current time bottom-right aligned only in Skylight modes
-  if (strcmp(mode, "Skylight Mode 1") == 0 || strcmp(mode, "Skylight Mode 2") == 0) {
-    DateTime now = rtc.now();
-    char timeString[9]; // "HH:MM AM/PM"
-    int hour = now.hour();
-    String am_pm = "AM";
-    if (hour == 0) {
-        hour = 12;  // Midnight case
-    } else if (hour == 12) {
-        am_pm = "PM"; // Noon case
-    } else if (hour > 12) {
-        hour -= 12;
-        am_pm = "PM";
-    }
-    sprintf(timeString, "%02d:%02d %s", hour, now.minute(), am_pm.c_str());
+  // Display current time bottom-right aligned
+  DateTime now = rtc.now();
+  char timeString[9]; // "HH:MM AM/PM"
+  int hour = now.hour();
+  String am_pm = "AM";
+  if (hour == 0) {
+      hour = 12;  // Midnight case
+  } else if (hour == 12) {
+      am_pm = "PM"; // Noon case
+  } else if (hour > 12) {
+      hour -= 12;
+      am_pm = "PM";
+  }
+  sprintf(timeString, "%d:%02d %s", hour, now.minute(), am_pm.c_str());
   int16_t x1, y1;
   uint16_t w, h;
   display.getTextBounds(timeString, 0, 0, &x1, &y1, &w, &h);  // Calculate the width and height of the time string
   display.setCursor(SCREEN_WIDTH - w - 1, SCREEN_HEIGHT - h); // Position the cursor for right alignment at the bottom
   display.print(timeString);
-  }
   
   // Done
   display.display();
