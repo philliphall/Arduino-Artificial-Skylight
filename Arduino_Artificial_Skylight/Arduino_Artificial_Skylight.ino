@@ -13,7 +13,6 @@ Designed for Board: Arduino Uno
 #include <EEPROM.h>
 #include <SolarCalculator.h>
 #include <RTClib.h>
-#include <TimeLib.h>
 #include <Wire.h>
 #include <Math.h>
 #include <Adafruit_SSD1306.h>
@@ -159,12 +158,6 @@ void setup() {
   DEBUG_PRINT(DEBUG_INFO, "Setting initial Mode from EEPROM: ");
   DEBUG_PRINTLN(DEBUG_INFO, currentMode);
   
-  // Time Initialization
-  if (!rtc.begin()) {
-    DEBUG_PRINTLN(DEBUG_ERROR, "Couldn't find RTC");
-    Serial.flush();
-  }
-
   // OLED Begin
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
     DEBUG_PRINTLN(DEBUG_ERROR, "SSD1306 allocation failed");
@@ -175,6 +168,18 @@ void setup() {
   display.cp437(true);
   display.ssd1306_command(SSD1306_SETCONTRAST);
   display.ssd1306_command(255); // Set initial brightness to 100%
+
+  // Time Initialization
+  if (!rtc.begin()) {
+    DEBUG_PRINTLN(DEBUG_ERROR, "Couldn't find RTC");
+    Serial.flush();
+  }
+  DateTime now = rtc.now();
+  if (now.year() < 2021 || now.year() > 2124) { // Check if the date seems reasonable
+    DEBUG_PRINTLN(DEBUG_ERROR, "RTC is running but the time is not set correctly");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set to the compile time
+    enterDateTimeSettingMode();
+  }
   
   // Used in MODE_POTENTIOMETER
   #if defined(MODE_POTENTIOMETER)
@@ -213,12 +218,12 @@ void setup() {
 
 // *** MAIN LOOP ***
 void loop() {  
-  currentMillis = millis();   // capture the latest value of millis()
+  currentMillis = millis(); // capture the latest value of millis()
   
   // Start by looking for a mode change
-  readButton(); // looks for mode change switch use
+  readButton(); // Checks and handles button press
   
-  // Potential mode change through potentiometer 
+  // Check potentiometer changes to reset interaction timer
   #if defined(MODE_POTENTIOMETER)
   potval = analogRead(POT_PIN); // doing this now so I can use the value to check for mode change, and later if I'm in manual mode
   int potChange = abs(potval - previousPotval);
@@ -233,16 +238,15 @@ void loop() {
   int potChange = 0;
   #endif 
 
-  // Reset the last interaction time if there is any interaction
-  if (potChange > 25 || digitalRead(MODE_SW) == LOW) {
+  // Reset the last interaction time for small pot moves
+  if (potChange > 25) { // Threshold for considering it an interaction
     lastInteractionMillis = currentMillis;
-    if (isDimmed) {
+    previousPotval = potval;
+    if (isDimmed || isOff) { // Re-activate the display if it was dimmed or turned off
       display.ssd1306_command(SSD1306_SETCONTRAST);
       display.ssd1306_command(255);
-      isDimmed = false;
-    }
-    if (isOff) {
       display.display();
+      isDimmed = false;
       isOff = false;
     }
   }
@@ -264,6 +268,7 @@ void loop() {
     isOff = true;
   }
   
+  // Execute the current mode’s function
   switch (currentMode) {
     case 0:
       handlePotentiometerMode();
@@ -631,11 +636,31 @@ void analogWrite16(uint8_t pin, uint16_t val) {
   }
 }
 
+// Function to debounce button presses
+bool readDebouncedButton(int pin) {
+    static int lastState = LOW; // Remember last button state
+    static unsigned long lastDebounceTime = 0; // Last time the button state was toggled
+    const unsigned long debounceDelay = 50; // Debounce time in milliseconds
+
+    int currentState = digitalRead(pin);
+    if (currentState != lastState) {
+        lastDebounceTime = millis(); // Reset the debouncing timer
+    }
+
+    if ((millis() - lastDebounceTime) > debounceDelay) {
+        // If the button state has not changed for the debounce period, consider it stable
+        lastState = currentState;
+        return currentState;
+    }
+
+    return lastState; // Return the last stable state
+}
+
 // Read the momentary mode switch button
 void readButton() {
   static unsigned long buttonPressedTime = 0; // Track when the button was initially pressed
 
-  if (digitalRead(MODE_SW) == LOW) { // Button is pressed
+  if (readDebouncedButton(MODE_SW) == LOW) { // Button is pressed
     
     if (buttonPressedTime == 0) { // First detection of the button being pressed
       buttonPressedTime = currentMillis; // Record the time the button was pressed
@@ -647,7 +672,15 @@ void readButton() {
   } else if (buttonPressedTime != 0) { // Button is not presed, but WAS pressed
     if ((currentMillis - buttonPressedTime > 25) && (currentMillis - buttonPressedTime <= 4000)) {
       // Handle normal button press if it was not a long press
-      cycleModes(); // Function to cycle through modes
+      if (isDimmed || isOff) {
+        display.ssd1306_command(SSD1306_SETCONTRAST);
+        display.ssd1306_command(255); // Restore full brightness
+        display.display();
+        isDimmed = false;
+        isOff = false;
+      } else {
+        cycleModes(); // Only cycle modes if not just waking up the display
+      }
     }
     // Reset variables for next button press
     buttonPressedTime = 0;
@@ -657,39 +690,31 @@ void readButton() {
 void cycleModes() {
   previousMillis = 0; // Reset timing to ensure immediate mode update        
 
-  // If the display is dimmed or off, restore full brightness and reset timers
-  if (isDimmed || isOff) {
-    lastInteractionMillis = currentMillis;
-    isDimmed = false;
-    isOff = false;
-    display.ssd1306_command(SSD1306_SETCONTRAST);
-    display.ssd1306_command(255);
-    display.display();
-  } else {
-    // Cycle through modes
-    currentMode = (currentMode + 1) % 5;
-    EEPROM.update(ADDR_MODE, currentMode);  // Save new mode to EEPROM whenever it changes
-    
-    // New mode dependent actions
-    if (currentMode == 0) {
-      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 0 - Manual Dimming");
-      handlePotentiometerMode(true);
-    } else if (currentMode == 1) {
-      handleSkylightMode1(true);
-      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 1 - Skylight Mode 1");
-    } else if (currentMode == 2) {
-      handleSkylightMode2(true);
-      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 2 - Skylight Mode 2");
-    } else if (currentMode == 3) {
-      handlePhotoresistorMatchMode(true);
-      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 3 - Photo Match");
-    } else if (currentMode == 4) {
-      DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 4 - Demo");
-      #if defined(MODE_DEMO)      
-      handleDemoMode(true);
-      #endif
-    } 
-  } // End cycle through modes
+  // Cycle through modes
+  currentMode = (currentMode + 1) % 5;
+  EEPROM.update(ADDR_MODE, currentMode);  // Save new mode to EEPROM whenever it changes
+  
+  // Log mode entry
+  DEBUG_PRINTLN(DEBUG_WARNING, "Switched to mode: " + String(currentMode));    
+  
+  // Perform initial actions for the new mode
+  switch (currentMode) {
+    case 0:
+      handlePotentiometerMode(true); // Force update
+      break;
+    case 1:
+      handleSkylightMode1(true); // Force update
+      break;
+    case 2:
+      handleSkylightMode2(true); // Force update
+      break;
+    case 3:
+      handlePhotoresistorMatchMode(true); // Force update
+      break;
+    case 4:
+      handleDemoMode(true); // Force update
+      break;
+  }
 } // End cycleModes definition
 
 // When entering time setting mode, wait for user to set the potentiometer to approximate center before proceeding. 
@@ -701,7 +726,7 @@ void enterDateTimeSettingMode() {
   display.display();
 
   // Wait for button release
-  while (digitalRead(MODE_SW) == HIGH) delay(50);
+  while (readDebouncedButton(MODE_SW) == HIGH) delay(50);
 
   // Get currently set date and time
   DateTime now = rtc.now();  // Assuming RTC is set up
@@ -710,7 +735,7 @@ void enterDateTimeSettingMode() {
   adjustDate(now);
 
   // Wait for button release
-  while (digitalRead(MODE_SW) == HIGH) delay(50);
+  while (readDebouncedButton(MODE_SW) == HIGH) delay(50);
 
   // Adjust time
   adjustTime(now);
@@ -718,7 +743,7 @@ void enterDateTimeSettingMode() {
   // Finalize
   rtc.adjust(now); // Save the new time to RTC
   previousMillis = 0; // Reset previousMillis so whatever mode we are returning to updates the display.
-  while (digitalRead(MODE_SW) == HIGH) delay(50); // Ensure button released before returning
+  while (readDebouncedButton(MODE_SW) == HIGH) delay(50); // Ensure button released before returning
 }
 
 // Wait for user to adjust potentiometer to middle
@@ -741,7 +766,7 @@ void adjustDate(DateTime &now) {
   waitForMiddle();
   displayDateSetting(now);
 
-  while (digitalRead(MODE_SW) == HIGH) {
+  while (readDebouncedButton(MODE_SW) == HIGH) {
     int potValue = analogRead(POT_PIN);
     int delta = potValue - 512;
 
@@ -825,7 +850,7 @@ void adjustTime(DateTime &now) {
   waitForMiddle();
   displayTimeSetting(now);
 
-  while (digitalRead(MODE_SW) == HIGH) { // Exit loop when button is pressed again
+  while (readDebouncedButton(MODE_SW) == HIGH) { // Exit loop when button is pressed again
     int potValue = analogRead(POT_PIN);
     int delta = potValue - 512;
 
