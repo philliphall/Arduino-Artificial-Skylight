@@ -799,7 +799,7 @@ void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool
   }
   
   // Add raw led_value16 in Demo mode
-  if (curmode == 4) {
+  if (currentMode == DemoMode) {
     display.print("Raw 16-bit: ");
     display.println(led_value16);
   }
