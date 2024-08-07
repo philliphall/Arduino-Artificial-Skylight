@@ -13,6 +13,7 @@ Designed for Board: Arduino Uno
 #include <EEPROM.h>
 #include <SolarCalculator.h>
 #include <RTClib.h>
+#include <TimeLib.h>
 #include <Wire.h>
 #include <Math.h>
 #include <Adafruit_SSD1306.h>
@@ -21,19 +22,19 @@ RTC_DS3231 rtc;
 // Configuration Variables
 const float latitude = 34.21316116274671;   // Hardcode your current location for skylight mode
 const float longitude = -84.54894616203148; // Hardcode your current location for skylight mode
-#define DAYLIGHT_VALUE 200                  // Compared to full range of 0-255 - my light is way too bright for indoors 
+#define DAYLIGHT_VALUE 200               // Compared to full range of 0-255 - my light is way too bright for indoors 
 #define DAYLIGHT_VALUE16 55000
 #define MIN_ILLUM 1
-#define MIN_ILLUM16 25                      // Because some displays really don't like being super low on the PWM signal.
-#define PHOTO_OFFSET -50                    // The photoresistors aren't identical, and their connections and cord lengths aren't identical. The external reading will be adjusted by this much.
-#define DIMMING_TIME 30000                  // OLED dimming time in milliseconds (30 seconds)
-#define DIMMED_BRIGHTNESS 5                 // OLED dimmed brightness as a percentage (5%)
-#define OFF_TIME 300000                     // OLED Off time in milliseconds (5 minutes)
-#define SKY_CHECK_INTERVAL 10000            // Used in mode 1&2 - only update skylight every xx milliseconds
-#define OLED_UPDATE_INTERVAL 500            // Milliseconds between OLED display updates
+#define MIN_ILLUM16 25                   // Because some displays really don't like being super low on the PWM signal.
+#define PHOTO_OFFSET -50                 // The photoresistors aren't identical, and their connections and cord lengths aren't identical. The external reading will be adjusted by this much.
+#define DIMMING_TIME 30000               // OLED dimming time in milliseconds (30 seconds)
+#define DIMMED_BRIGHTNESS 5              // OLED dimmed brightness as a percentage (5%)
+#define OFF_TIME 300000                  // OLED Off time in milliseconds (5 minutes)
+#define SKY_CHECK_INTERVAL 10000         // Used in mode 1&2 - only update skylight every xx milliseconds
+#define OLED_UPDATE_INTERVAL 500         // Milliseconds between OLED display updates
 
 // Enabled Modes
-#define MODE_POTENTIOMETER                  // Only include the modes you want available
+#define MODE_POTENTIOMETER               // Only include the modes you want available
 #define MODE_SKYLIGHT1
 #define MODE_SKYLIGHT2
 //#define MODE_PHOTO_MATCH
@@ -48,9 +49,9 @@ const float longitude = -84.54894616203148; // Hardcode your current location fo
 #define POT_PIN A0
 
 // OLED Setup
-#define SCREEN_WIDTH 128        // OLED display width, in pixels
-#define SCREEN_HEIGHT 32        // OLED display height, in pixels
-#define OLED_RESET    -1        // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_WIDTH 128                 // OLED display width, in pixels
+#define SCREEN_HEIGHT 32                 // OLED display height, in pixels
+#define OLED_RESET    -1                 // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Debugging setup
@@ -61,7 +62,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define DEBUG_VERBOSE 4
 #define DEBUG_NEVER 9 // This is really only a placeholder. If you want to see this information, change the debug level on the specific line of code from NEVER to something else.
 
-#define DEBUG_LEVEL DEBUG_WARNING       // Set the debug level here
+#define DEBUG_LEVEL DEBUG_WARNING        // Set the debug level here
 
 #define DEBUG_PRINT(level, message) \
     do { if (DEBUG_LEVEL >= level) Serial.print(message); } while (0)
@@ -69,31 +70,31 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
     do { if (DEBUG_LEVEL >= level) Serial.println(message); } while (0)
 
 // EEPROM addresses
-#define ADDR_SIGNATURE 0                // Address for signature
-#define ADDR_MODE 1                     // Address for the mode
-#define EEPROM_SIGNATURE 0xD4           // Signature byte
+#define ADDR_SIGNATURE 0                 // Address for signature
+#define ADDR_MODE 1                      // Address for the mode
+#define EEPROM_SIGNATURE 0xD4            // Signature byte
 
 // Global Scope Declarations
-unsigned long currentMillis = 0;        // stores the value of millis() in each iteration of loop()
-unsigned long previousMillis = 0;       // for various timings - mode dependent
-unsigned long lastInteractionMillis = 0;// Global variable to track the last interaction time for OLED dimming
-unsigned long lastOledUpdateMillis = 0; // Global variable to limit OLED updates
-uint8_t curmode = 0;                    // 0-Manual, 1-Skylight1, 2-Skylight2, 3-PhotoMatch, 4-Demo
-uint8_t led_value = 10;                 // This will be the dynamic LED brightness sent to PWM
-uint16_t led_value16 = MIN_ILLUM16;     // 16-bit version. Only keeping the 8-bit for legacy compatibility
-#define ICR 0xffff                      // I don't really understand this but it's used in setting up 16-bit PWM
-bool isDimmed = false;                  // Variable to track the current display brightness state
-bool isOff = false;                     // Variable to track the current display brightness state
+unsigned long currentMillis = 0;         // stores the value of millis() in each iteration of loop()
+unsigned long previousMillis = 0;        // for various timings - mode dependent
+unsigned long lastInteractionMillis = 0; // Global variable to track the last interaction time for OLED dimming
+unsigned long lastOledUpdateMillis = 0;  // Global variable to limit OLED updates
+uint8_t currentMode = 0;                 // 0-Manual, 1-Skylight1, 2-Skylight2, 3-PhotoMatch, 4-Demo
+uint8_t led_value = 10;                  // This will be the dynamic LED brightness sent to PWM
+uint16_t led_value16 = MIN_ILLUM16;      // 16-bit version. Only keeping the 8-bit for legacy compatibility
+#define ICR 0xffff                       // I don't really understand this but it's used in setting up 16-bit PWM
+bool isDimmed = false;                   // Variable to track the current display brightness state
+bool isOff = false;                      // Variable to track the current display brightness state
 
 // Global variables for MODE_POTENTIOMETER
 #if defined(MODE_POTENTIOMETER)
-int potval;                             // Used in mode 0 - value read from the potentiometer on pot_pin
-int previousPotval = 0;                 // Used to change to manual mode from other modes
-#define AVERAGE_BUFFER_SIZE 100         // Number of readings to average
-int potReadings[AVERAGE_BUFFER_SIZE];   // Array to store the potentiometer readings
-int readIndex = 0;                      // Index for the next reading
-long total = 0;                         // Running total of the readings
-int average = 0;                        // Average of the readings
+int potval;                              // Used in mode 0 - value read from the potentiometer on pot_pin
+int previousPotval = 0;                  // Used to change to manual mode from other modes
+#define AVERAGE_BUFFER_SIZE 100          // Number of readings to average
+int potReadings[AVERAGE_BUFFER_SIZE];    // Array to store the potentiometer readings
+int readIndex = 0;                       // Index for the next reading
+long total = 0;                          // Running total of the readings
+int average = 0;                         // Average of the readings
 #endif
 
 // Global variables used in Skylight Mode 1
@@ -113,14 +114,14 @@ float max_combined_level = 0;
 
 // Global variables used in Photo Match Mode
 #if defined(MODE_PHOTO_MATCH)
-int photo_int;                          // Used in mode 3 - value read from the indoor photoresistor
-int photo_ext;                          // Used in mode 3 - value read from the outdoor photoresistor
+int photo_int;                           // Used in mode 3 - value read from the indoor photoresistor
+int photo_ext;                           // Used in mode 3 - value read from the outdoor photoresistor
 #endif
 
 // Global variables used in Demo Mode
 #if defined(MODE_DEMO)
-boolean demoDirectionUp = true;         // Used in mode 4 - state variable
-uint8_t demoCounter = 255;              // Used in mode 4 - increment the 8-bit PWM value once every 256 iterations of the 16-bit loop
+boolean demoDirectionUp = true;          // Used in mode 4 - state variable
+uint8_t demoCounter = 255;               // Used in mode 4 - increment the 8-bit PWM value once every 256 iterations of the 16-bit loop
 #endif
 
 // Function Prototypes
@@ -135,8 +136,8 @@ void setupPWM16();
 void analogWrite16(uint8_t pin, uint16_t val);
 void readButton();
 void cycleModes();
-void enterTimeSettingMode();
-void adjustTimeWithPot();
+void enterDateTimeSettingMode();
+void adjustTime();
 void displayTimeSetting(const DateTime &now);
 void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool forceUpdate = false);
 uint8_t gammaCorrection(uint8_t led_value, float gamma = 2.2);
@@ -154,9 +155,9 @@ void setup() {
   
   // Restore last mode
   initializeEEPROM();
-  curmode = EEPROM.read(ADDR_MODE);
+  currentMode = EEPROM.read(ADDR_MODE);
   DEBUG_PRINT(DEBUG_INFO, "Setting initial Mode from EEPROM: ");
-  DEBUG_PRINTLN(DEBUG_INFO, curmode);
+  DEBUG_PRINTLN(DEBUG_INFO, currentMode);
   
   // Time Initialization
   if (!rtc.begin()) {
@@ -221,11 +222,11 @@ void loop() {
   #if defined(MODE_POTENTIOMETER)
   potval = analogRead(POT_PIN); // doing this now so I can use the value to check for mode change, and later if I'm in manual mode
   int potChange = abs(potval - previousPotval);
-  if (curmode != 0 && potChange > 50) {
-    curmode = 0; // Dimmer moved - switch to manual dimming mode
+  if (currentMode != 0 && potChange > 50) {
+    currentMode = 0; // Dimmer moved - switch to manual dimming mode
     previousMillis = 0; // Always reset on mode change
     DEBUG_PRINTLN(DEBUG_WARNING, "Manual Overide - Entering mode 0 - Manual Dimming");
-    EEPROM.update(ADDR_MODE, curmode);  // Save new mode to EEPROM whenever it changes
+    EEPROM.update(ADDR_MODE, currentMode);  // Save new mode to EEPROM whenever it changes
     previousPotval = potval;
   }
   #else 
@@ -263,7 +264,7 @@ void loop() {
     isOff = true;
   }
   
-  switch (curmode) {
+  switch (currentMode) {
     case 0:
       handlePotentiometerMode();
       break;
@@ -323,6 +324,8 @@ void handlePotentiometerMode(bool forceUpdate) {
     DEBUG_PRINT(DEBUG_VERBOSE, " | LED 16-bit: ");
     DEBUG_PRINTLN(DEBUG_VERBOSE, led_value16);  
   }
+  #else
+  cycleModes();
   #endif
 }
 
@@ -397,6 +400,8 @@ void handleSkylightMode1(bool forceUpdate) {
     DEBUG_PRINT(DEBUG_VERBOSE, "   LED Value16: ");
     DEBUG_PRINTLN(DEBUG_VERBOSE, led_value16);
   }
+  #else
+  cycleModes();
   #endif
 }
 
@@ -491,6 +496,8 @@ void handleSkylightMode2(bool forceUpdate) {
     DEBUG_PRINT(DEBUG_VERBOSE, "   LED Value16: ");
     DEBUG_PRINTLN(DEBUG_VERBOSE, led_value16);
   }
+  #else
+  cycleModes();
   #endif
 }
 
@@ -536,6 +543,8 @@ void handlePhotoresistorMatchMode(bool forceUpdate) {
     DEBUG_PRINT(DEBUG_VERBOSE, ", photo_int: ");
     DEBUG_PRINTLN(DEBUG_VERBOSE, photo_int);
   }
+  #else
+  cycleModes();
   #endif
 }
 
@@ -571,6 +580,8 @@ void handleDemoMode(bool forceUpdate) {
   analogWrite(LED_PIN, led_value);
   analogWrite16(LED_PIN16, led_value16);
   updateDisplay("Demo Mode", -1, led_value16, forceUpdate);
+  #else
+  cycleModes();
   #endif
 } // End Demo Mode
 
@@ -625,18 +636,18 @@ void readButton() {
   static unsigned long buttonPressedTime = 0; // Track when the button was initially pressed
 
   if (digitalRead(MODE_SW) == LOW) { // Button is pressed
+    
     if (buttonPressedTime == 0) { // First detection of the button being pressed
       buttonPressedTime = currentMillis; // Record the time the button was pressed
         } else if ((currentMillis - buttonPressedTime > 4000)) { // Check for long press
-      enterTimeSettingMode(); // Function to handle long press, enter time setting mode
-            buttonPressedTime = 0; // Reset the timer after handling long press
-            return; // Exit the function to avoid further processing in the same press
+          enterDateTimeSettingMode(); // Function to handle long press, enter time setting mode
+          buttonPressedTime = 0; // Reset the timer after handling long press
+          return; // Exit the function to avoid further processing in the same press
     }
   } else if (buttonPressedTime != 0) { // Button is not presed, but WAS pressed
     if ((currentMillis - buttonPressedTime > 25) && (currentMillis - buttonPressedTime <= 4000)) {
       // Handle normal button press if it was not a long press
-      cycleModes(); // Function to cycle through modes or handle short press functionality
-      previousMillis = 0; // Redundant, but I can't figure why this isn't being respected in cycleModes
+      cycleModes(); // Function to cycle through modes
     }
     // Reset variables for next button press
     buttonPressedTime = 0;
@@ -649,48 +660,30 @@ void cycleModes() {
   // If the display is dimmed or off, restore full brightness and reset timers
   if (isDimmed || isOff) {
     lastInteractionMillis = currentMillis;
+    isDimmed = false;
+    isOff = false;
     display.ssd1306_command(SSD1306_SETCONTRAST);
     display.ssd1306_command(255);
     display.display();
-    isDimmed = false;
-    isOff = false;
   } else {
-    // Cycle through modes, skipping undefined ones
-    do {
-      curmode = (curmode + 1) % 5;
-      EEPROM.update(ADDR_MODE, curmode);  // Save new mode to EEPROM whenever it changes
-      #ifndef MODE_POTENTIOMETER
-      if (curmode == 0) continue;
-      #endif
-      #ifndef MODE_SKYLIGHT1
-      if (curmode == 1) continue;
-      #endif
-      #ifndef MODE_SKYLIGHT2
-      if (curmode == 2) continue;
-      #endif
-      #ifndef MODE_PHOTO_MATCH
-      if (curmode == 3) continue;
-      #endif
-      #ifndef MODE_DEMO
-      if (curmode == 4) continue;
-      #endif
-      break;
-    } while (true);
+    // Cycle through modes
+    currentMode = (currentMode + 1) % 5;
+    EEPROM.update(ADDR_MODE, currentMode);  // Save new mode to EEPROM whenever it changes
     
     // New mode dependent actions
-    if (curmode == 0) {
+    if (currentMode == 0) {
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 0 - Manual Dimming");
       handlePotentiometerMode(true);
-    } else if (curmode == 1) {
+    } else if (currentMode == 1) {
       handleSkylightMode1(true);
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 1 - Skylight Mode 1");
-    } else if (curmode == 2) {
+    } else if (currentMode == 2) {
       handleSkylightMode2(true);
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 2 - Skylight Mode 2");
-    } else if (curmode == 3) {
+    } else if (currentMode == 3) {
       handlePhotoresistorMatchMode(true);
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 3 - Photo Match");
-    } else if (curmode == 4) {
+    } else if (currentMode == 4) {
       DEBUG_PRINTLN(DEBUG_WARNING, "Entering mode 4 - Demo");
       #if defined(MODE_DEMO)      
       handleDemoMode(true);
@@ -700,29 +693,136 @@ void cycleModes() {
 } // End cycleModes definition
 
 // When entering time setting mode, wait for user to set the potentiometer to approximate center before proceeding. 
-void enterTimeSettingMode() {
+void enterDateTimeSettingMode() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Set Time Mode");
+  display.println("Release button please.");
+  display.display();
+
+  // Wait for button release
+  while (digitalRead(MODE_SW) == HIGH) delay(50);
+
+  // Get currently set date and time
+  DateTime now = rtc.now();  // Assuming RTC is set up
+
+  // Adjust date
+  adjustDate(now);
+
+  // Wait for button release
+  while (digitalRead(MODE_SW) == HIGH) delay(50);
+
+  // Adjust time
+  adjustTime(now);
+
+  // Finalize
+  rtc.adjust(now); // Save the new time to RTC
+  previousMillis = 0; // Reset previousMillis so whatever mode we are returning to updates the display.
+  while (digitalRead(MODE_SW) == HIGH) delay(50); // Ensure button released before returning
+}
+
+// Wait for user to adjust potentiometer to middle
+void waitForMiddle() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println("Set Time Mode");
   display.println("Adjust to middle to begin.");
   display.display();
 
-  // Wait for user to adjust potentiometer to middle
   int potValue = 0;
   do {
     potValue = analogRead(POT_PIN);
     delay(100);
   } while (abs(potValue - 512) > 25); // Assume middle is around 512 in a 0-1023 range
+}
 
-  // Now adjust time
-  adjustTimeWithPot();
+// Adjust date in a few different speeds based on movement up or down fron center
+void adjustDate(DateTime &now) {
+  waitForMiddle();
+  displayDateSetting(now);
+
+  while (digitalRead(MODE_SW) == HIGH) {
+    int potValue = analogRead(POT_PIN);
+    int delta = potValue - 512;
+
+    if (abs(delta) > 400) {               // Adjust year
+      int yearAdjust = delta / 400;
+      addDate(now, 0, 0, yearAdjust);
+    } else if (abs(delta) > 250) {        // Adjust month
+      int monthAdjust = delta / 250;
+      addDate(now, 0, monthAdjust, 0);
+    } else if (abs(delta) > 100) {        // Adjust day
+      int dayAdjust = delta / 100;
+      addDate(now, dayAdjust, 0, 0);
+    }
+    displayTimeSetting(now);
+    delay(100);
+  } // Button has been pressed again
+}
+
+// Function to display the current date in a specific format on the OLED
+void displayDateSetting(const DateTime &now) {
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "Set Date Mode\n%02d-%02d-%04d", now.day(), now.month(), now.year());
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print(buffer);
+    display.display();
+}
+
+// Function to add days, months, and years to a DateTime object
+void addDate(DateTime &date, int daysToAdd, int monthsToAdd, int yearsToAdd) {
+  // Days in each month
+  const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+  // Add days and adjust for month overflow
+  int day = date.day() + daysToAdd;
+  int month = date.month();
+  int year = date.year();
+
+  // Check for leap year
+  auto isLeap = [year]() {
+    return (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+  };
+
+  while (day > daysInMonth[month - 1] + (month == 2 && isLeap())) {
+    day -= daysInMonth[month - 1] + (month == 2 && isLeap());
+    monthsToAdd++;
+    month++;
+    if (month > 12) {
+      month -= 12;
+      year++;
+    }
+  }
+
+  // Add months and adjust for year overflow
+  month += monthsToAdd;
+  while (month > 12) {
+    month -= 12;
+    yearsToAdd++;
+  }
+
+  // Add years
+  year += yearsToAdd;
+
+  // Re-check the days in case the year change affects February's days
+  while (day > daysInMonth[month - 1] + (month == 2 && isLeap())) {
+    day -= daysInMonth[month - 1] + (month == 2 && isLeap());
+    month++;
+    if (month > 12) {
+      month -= 12;
+      year++;
+    }
+  }
+
+  // Create new DateTime object with the adjusted values, preserving the time
+  DateTime newDate(year, month, day, date.hour(), date.minute(), date.second());
+  date = newDate; // Update the original date
 }
 
 // Adjust time in a few different speeds based on movement up or down from center
-void adjustTimeWithPot() {
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  DateTime now = rtc.now(); // Assuming you have set up your RTC
+void adjustTime(DateTime &now) {
+  waitForMiddle();
   displayTimeSetting(now);
 
   while (digitalRead(MODE_SW) == HIGH) { // Exit loop when button is pressed again
@@ -741,8 +841,6 @@ void adjustTimeWithPot() {
     displayTimeSetting(now);
     delay(100);
   } // Button has been pressed again
-  rtc.adjust(now); // Save the new time to RTC
-  previousMillis = 0; // Reset previousMillis so whatever mode we are returning to updates the display.
 }
 
 // Function to display the current time in a specific format on the OLED
@@ -790,7 +888,7 @@ void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool
   display.setCursor(0, display.getCursorY() + 1); // Little extra space between lines
 
   // Display elevation in Skylight modes
-  if (curmode == 1 || curmode == 2) {
+  if (currentMode == 1 || currentMode == 2) {
     display.print("Ele: ");
     display.print(elevation, 1); // Print elevation with one decimal place
     display.write(248); // Degree symbol
@@ -799,7 +897,7 @@ void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool
   }
   
   // Add raw led_value16 in Demo mode
-  if (currentMode == DemoMode) {
+  if (currentMode == 4) {
     display.print("Raw 16-bit: ");
     display.println(led_value16);
   }
