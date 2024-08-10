@@ -84,11 +84,13 @@ uint16_t led_value16 = MIN_ILLUM16;      // 16-bit version. Only keeping the 8-b
 #define ICR 0xffff                       // I don't really understand this but it's used in setting up 16-bit PWM
 bool isDimmed = false;                   // Variable to track the current display brightness state
 bool isOff = false;                      // Variable to track the current display brightness state
+#define BUTTON_DEBOUND_DELAY 50          // Debounce time in milliseconds
 
 // Global variables for MODE_POTENTIOMETER
 #if defined(MODE_POTENTIOMETER)
 int potval;                              // Used in mode 0 - value read from the potentiometer on pot_pin
-int previousPotval = 0;                  // Used to change to manual mode from other modes
+int previousInteractionPotval = 0;                  // Used to change to manual mode from other modes
+int previousModePotval = 0;              // New variable to track potentiometer value for mode changes
 #define AVERAGE_BUFFER_SIZE 100          // Number of readings to average
 int potReadings[AVERAGE_BUFFER_SIZE];    // Array to store the potentiometer readings
 int readIndex = 0;                       // Index for the next reading
@@ -186,7 +188,8 @@ void setup() {
   for (int thisReading = 0; thisReading < AVERAGE_BUFFER_SIZE; thisReading++) { // Init Debounce Array
     potReadings[thisReading] = 0; 
   }
-  previousPotval = analogRead(POT_PIN); // So we don't immediately switch to manual on first run.
+  previousInteractionPotval = analogRead(POT_PIN); // So we don't immediately switch to manual on first run.
+  previousModePotval = previousInteractionPotval;
   #endif
 
   // Used in Skylight Mode 1 - Linear LED Brightness
@@ -218,30 +221,26 @@ void setup() {
 
 // *** MAIN LOOP ***
 void loop() {  
-  currentMillis = millis(); // capture the latest value of millis()
+  currentMillis = millis();              // capture the latest value of millis()
+  potval = analogRead(POT_PIN);          // Read current potentiometer value only once per loop
   
   // Start by looking for a mode change
-  readButton(); // Checks and handles button press
+  readButton();                          // Checks and handles button press
   
-  // Check potentiometer changes to reset interaction timer
+  // Check for larger potentiometer changes to detect change
   #if defined(MODE_POTENTIOMETER)
-  potval = analogRead(POT_PIN); // doing this now so I can use the value to check for mode change, and later if I'm in manual mode
-  int potChange = abs(potval - previousPotval);
-  if (currentMode != 0 && potChange > 50) {
-    currentMode = 0; // Dimmer moved - switch to manual dimming mode
-    previousMillis = 0; // Always reset on mode change
-    DEBUG_PRINTLN(DEBUG_WARNING, "Manual Overide - Entering mode 0 - Manual Dimming");
+  if (currentMode != 0 && abs(potval - previousModePotval) > 50) {
+    currentMode = 0;                     // Dimmer moved - switch to manual dimming mode
+    previousMillis = 0;                  // Always reset on mode change
+    DEBUG_PRINTLN(DEBUG_WARNING, "Manual Override - Entering mode 0 - Manual Dimming");
     EEPROM.update(ADDR_MODE, currentMode);  // Save new mode to EEPROM whenever it changes
-    previousPotval = potval;
+    previousModePotval = potval;            // Reset  
+    lastInteractionMillis = currentMillis;  // Reset interaction timer
   }
-  #else 
-  int potChange = 0;
   #endif 
 
-  // Reset the last interaction time for small pot moves
-  if (potChange > 25) { // Threshold for considering it an interaction
-    lastInteractionMillis = currentMillis;
-    previousPotval = potval;
+  // Check smaller potentiometer changes to reset interaction timer
+  if (abs(potval - previousInteractionPotval) > 25) { // Threshold for considering it an interaction
     if (isDimmed || isOff) { // Re-activate the display if it was dimmed or turned off
       display.ssd1306_command(SSD1306_SETCONTRAST);
       display.ssd1306_command(255);
@@ -249,6 +248,8 @@ void loop() {
       isDimmed = false;
       isOff = false;
     }
+    previousInteractionPotval = potval;     // Reset
+    lastInteractionMillis = currentMillis;  // Reset last interaction timer
   }
   
   // Dimming logic
@@ -638,23 +639,27 @@ void analogWrite16(uint8_t pin, uint16_t val) {
 
 // Function to debounce button presses
 bool readDebouncedButton(int pin) {
-    static int lastState = LOW; // Remember last button state
+    static int lastStableState = HIGH; // Last stable state of the button (HIGH by default due to INPUT_PULLUP)
+    static int lastReading = HIGH;     // Last reading of the button state
     static unsigned long lastDebounceTime = 0; // Last time the button state was toggled
-    const unsigned long debounceDelay = 50; // Debounce time in milliseconds
 
-    int currentState = digitalRead(pin);
-    if (currentState != lastState) {
+    int currentReading = digitalRead(pin);
+
+    if (currentReading != lastReading) { // If the reading has changed
         lastDebounceTime = millis(); // Reset the debouncing timer
     }
 
-    if ((millis() - lastDebounceTime) > debounceDelay) {
-        // If the button state has not changed for the debounce period, consider it stable
-        lastState = currentState;
-        return currentState;
+    if ((millis() - lastDebounceTime) > BUTTON_DEBOUND_DELAY) {
+        // If the button state has been stable for the debounce period, consider it as a stable state
+        if (currentReading != lastStableState) {
+            lastStableState = currentReading; // Update stable state
+        }
     }
 
-    return lastState; // Return the last stable state
+    lastReading = currentReading; // Save the current reading for the next loop
+    return lastStableState; // Return the stable state
 }
+
 
 // Read the momentary mode switch button
 void readButton() {
@@ -681,9 +686,9 @@ void readButton() {
       } else {
         cycleModes(); // Only cycle modes if not just waking up the display
       }
+      lastInteractionMillis = currentMillis; // Reset the dimming timer
     }
-    // Reset variables for next button press
-    buttonPressedTime = 0;
+    buttonPressedTime = 0; // Reset variables for next button press
   }
 }
 
@@ -695,7 +700,8 @@ void cycleModes() {
   EEPROM.update(ADDR_MODE, currentMode);  // Save new mode to EEPROM whenever it changes
   
   // Log mode entry
-  DEBUG_PRINTLN(DEBUG_WARNING, "Switched to mode: " + String(currentMode));    
+  DEBUG_PRINT(DEBUG_WARNING, "Switched to mode: ");
+  DEBUG_PRINTLN(DEBUG_WARNING, currentMode);
   
   // Perform initial actions for the new mode
   switch (currentMode) {
@@ -726,24 +732,24 @@ void enterDateTimeSettingMode() {
   display.display();
 
   // Wait for button release
-  while (readDebouncedButton(MODE_SW) == HIGH) delay(50);
+  while (readDebouncedButton(MODE_SW) == LOW) delay(50);
 
   // Get currently set date and time
   DateTime now = rtc.now();  // Assuming RTC is set up
 
-  // Adjust date
-  adjustDate(now);
-
-  // Wait for button release
-  while (readDebouncedButton(MODE_SW) == HIGH) delay(50);
-
   // Adjust time
   adjustTime(now);
+
+  // Wait for button release
+  while (readDebouncedButton(MODE_SW) == LOW) delay(50);
+
+  // Adjust date
+  adjustDate(now);
 
   // Finalize
   rtc.adjust(now); // Save the new time to RTC
   previousMillis = 0; // Reset previousMillis so whatever mode we are returning to updates the display.
-  while (readDebouncedButton(MODE_SW) == HIGH) delay(50); // Ensure button released before returning
+  while (readDebouncedButton(MODE_SW) == LOW) delay(50); // Ensure button released before returning
 }
 
 // Wait for user to adjust potentiometer to middle
@@ -765,6 +771,7 @@ void waitForMiddle() {
 void adjustDate(DateTime &now) {
   waitForMiddle();
   displayDateSetting(now);
+  while (readDebouncedButton(MODE_SW) == LOW) delay(50); // Double check that button is released
 
   while (readDebouncedButton(MODE_SW) == HIGH) {
     int potValue = analogRead(POT_PIN);
@@ -780,28 +787,39 @@ void adjustDate(DateTime &now) {
       int dayAdjust = delta / 100;
       addDate(now, dayAdjust, 0, 0);
     }
-    displayTimeSetting(now);
+    displayDateSetting(now);
     delay(100);
   } // Button has been pressed again
 }
 
 // Function to display the current date in a specific format on the OLED
 void displayDateSetting(const DateTime &now) {
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "Set Date Mode\n%02d-%02d-%04d", now.day(), now.month(), now.year());
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.print(buffer);
-    display.display();
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Set Date Mode");
+
+  display.print("Day: ");
+  if (now.day() < 10) display.print('0'); // Add leading zero if necessary
+  display.println(now.day());
+
+  display.print("Month: ");
+  if (now.month() < 10) display.print('0'); // Add leading zero if necessary
+  display.println(now.month());
+
+  display.print("Year: ");
+  display.println(now.year());
+
+  display.display();
 }
+
 
 // Function to add days, months, and years to a DateTime object
 void addDate(DateTime &date, int daysToAdd, int monthsToAdd, int yearsToAdd) {
   // Days in each month
   const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
-  // Add days and adjust for month overflow
-  int day = date.day() + daysToAdd;
+  // Extract current day, month, and year
+  int day = date.day();
   int month = date.month();
   int year = date.year();
 
@@ -810,27 +828,22 @@ void addDate(DateTime &date, int daysToAdd, int monthsToAdd, int yearsToAdd) {
     return (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
   };
 
-  while (day > daysInMonth[month - 1] + (month == 2 && isLeap())) {
-    day -= daysInMonth[month - 1] + (month == 2 && isLeap());
-    monthsToAdd++;
-    month++;
-    if (month > 12) {
-      month -= 12;
-      year++;
-    }
-  }
+  // Adjust years
+  year += yearsToAdd;
 
-  // Add months and adjust for year overflow
+  // Adjust months and handle year overflow/underflow
   month += monthsToAdd;
   while (month > 12) {
     month -= 12;
-    yearsToAdd++;
+    year++;
+  }
+  while (month < 1) {
+    month += 12;
+    year--;
   }
 
-  // Add years
-  year += yearsToAdd;
-
-  // Re-check the days in case the year change affects February's days
+  // Adjust days and handle month overflow/underflow
+  day += daysToAdd;
   while (day > daysInMonth[month - 1] + (month == 2 && isLeap())) {
     day -= daysInMonth[month - 1] + (month == 2 && isLeap());
     month++;
@@ -839,16 +852,24 @@ void addDate(DateTime &date, int daysToAdd, int monthsToAdd, int yearsToAdd) {
       year++;
     }
   }
+  while (day < 1) {
+    month--;
+    if (month < 1) {
+      month += 12;
+      year--;
+    }
+    day += daysInMonth[month - 1] + (month == 2 && isLeap());
+  }
 
   // Create new DateTime object with the adjusted values, preserving the time
-  DateTime newDate(year, month, day, date.hour(), date.minute(), date.second());
-  date = newDate; // Update the original date
+  date = DateTime(year, month, day, date.hour(), date.minute(), date.second());
 }
 
 // Adjust time in a few different speeds based on movement up or down from center
 void adjustTime(DateTime &now) {
   waitForMiddle();
   displayTimeSetting(now);
+  while (readDebouncedButton(MODE_SW) == LOW) delay(50); // Double check that button is released
 
   while (readDebouncedButton(MODE_SW) == HIGH) { // Exit loop when button is pressed again
     int potValue = analogRead(POT_PIN);
@@ -870,22 +891,29 @@ void adjustTime(DateTime &now) {
 
 // Function to display the current time in a specific format on the OLED
 void displayTimeSetting(const DateTime &now) {
-  char buffer[32]; // Enough to handle all characters
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Set Time Mode");
+
   int hour = now.hour();
-  char am_pm[] = "AM";
+  char am_pm[3] = "AM";
   if (hour == 0) {
     hour = 12; // Midnight case
   } else if (hour == 12) {
-    strcpy(am_pm, "PM"); // Noon case
+    am_pm[0] = 'P'; // Noon case
   } else if (hour > 12) {
     hour -= 12;
-    strcpy(am_pm, "PM");
+    am_pm[0] = 'P';
   }
 
-  snprintf(buffer, sizeof(buffer), "Set Time Mode\n%02d:%02d %s", hour, now.minute(), am_pm);
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.print(buffer);
+  if (hour < 10) display.print('0'); // Add leading zero if necessary
+  display.print(hour);
+  display.print(':');
+  if (now.minute() < 10) display.print('0'); // Add leading zero if necessary
+  display.print(now.minute());
+  display.print(' ');
+  display.println(am_pm);
+
   display.display();
 }
 
@@ -929,18 +957,35 @@ void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool
 
   // Display current time bottom-right aligned
   DateTime now = rtc.now();
-  char timeString[9]; // "HH:MM AM/PM"
+  char timeString[9]; // Buffer for time string
   int hour = now.hour();
-  String am_pm = "AM";
+  char am_pm[3] = "AM";
   if (hour == 0) {
-      hour = 12;  // Midnight case
+    hour = 12; // Midnight case
   } else if (hour == 12) {
-      am_pm = "PM"; // Noon case
+    am_pm[0] = 'P'; // Noon case
   } else if (hour > 12) {
       hour -= 12;
-      am_pm = "PM";
+    am_pm[0] = 'P';
   }
-  sprintf(timeString, "%d:%02d %s", hour, now.minute(), am_pm.c_str());
+
+  // Construct the time string manually
+  int idx = 0;
+  if (hour < 10) timeString[idx++] = '0'; // Add leading zero if necessary
+  itoa(hour, &timeString[idx], 10);
+  idx += strlen(&timeString[idx]);
+
+  timeString[idx++] = ':';
+
+  if (now.minute() < 10) timeString[idx++] = '0'; // Add leading zero if necessary
+  itoa(now.minute(), &timeString[idx], 10);
+  idx += strlen(&timeString[idx]);
+
+  timeString[idx++] = ' ';
+  timeString[idx++] = am_pm[0];
+  timeString[idx++] = am_pm[1];
+  timeString[idx] = '\0'; // Null-terminate the string
+
   int16_t x1, y1;
   uint16_t w, h;
   display.getTextBounds(timeString, 0, 0, &x1, &y1, &w, &h);  // Calculate the width and height of the time string
