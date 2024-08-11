@@ -1,15 +1,47 @@
-/* Code for TV panel (without the LCD) being used as a light.
-So far we have 
-- Solar elevation.
-- Two different methods of mapping brightness based on elevation of sun.
-- A LED brightness curve that really only works in 8-bit mode. Math doesn't seem to work as well with 16-bit PWM. 
-- 16-bit PWM - MUCH smoother!
-- Switch that can disable Skylight mode and read a potentiometer instead.
+/*
+  Project: Skylight LED Controller
+  Description: 
+    This Arduino sketch simulates natural daylight using an LED panel (in my case, 
+    a free 85" TV with a broken LCD panel removed!), adjusting its brightness based 
+    on the solar elevation calculated from the user's geographical location. It 
+    supports multiple modes, including manual dimming via a potentiometer and 
+    automatic skylight simulation with different brightness curves. The system also 
+    includes an OLED display for real-time feedback and a real-time clock for 
+    accurate solar position calculations.
 
-Designed for Board: Arduino Uno
+  Hardware:
+    - Arduino Uno
+    - Real-Time Clock (RTC) DS3231
+    - OLED Display (SSD1306)
+    - Potentiometer
+    - LED Panel (PWM-controlled)
+  
+  Features:
+    - Dynamic brightness adjustment based on solar elevation
+    - Manual and automatic control modes
+    - OLED feedback for mode and brightness levels
+    - EEPROM memory management for storing settings
+    - Debugging support with adjustable verbosity
+
+  Modes:
+    - Manual Dimming: Control brightness with a potentiometer
+    - Skylight Mode 1: Simple brightness curve
+    - Skylight Mode 2: Complex, realistic solar simulation
+    - Photo Match Mode: Adjusts brightness to match external light (experimental)
+    - Demo Mode: Cycles through all brightness levels to test LED functionality
+
+  Libraries Used:
+    - RTClib.h for RTC management
+    - Adafruit_SSD1306.h for OLED display handling
+    - Wire.h for I2C communication
+    - EEPROM.h for non-volatile memory storage
+    - SolarCalculator.h for calculating solar position
+
+  TO DO:
+    - Modularize by hardware. Be able to compile without a display, for example. Or without a potentiometer, or button, or RTC module. 
+    - Split the code into multiple files for easier maintainability. 
 */
 
-// #include <LiquidCrystal.h>
 #include <EEPROM.h>
 #include <SolarCalculator.h>
 #include <RTClib.h>
@@ -31,13 +63,14 @@ const float longitude = -84.54894616203148; // Hardcode your current location fo
 #define OFF_TIME 300000                  // OLED Off time in milliseconds (5 minutes)
 #define SKY_CHECK_INTERVAL 10000         // Used in mode 1&2 - only update skylight every xx milliseconds
 #define OLED_UPDATE_INTERVAL 500         // Milliseconds between OLED display updates
+#define BUTTON_DEBOUND_DELAY 50          // Debounce time in milliseconds
 
-// Enabled Modes
-#define MODE_POTENTIOMETER               // Only include the modes you want available
-#define MODE_SKYLIGHT1
-#define MODE_SKYLIGHT2
-//#define MODE_PHOTO_MATCH
-//#define MODE_DEMO
+// Enabled Modes -  Only uncomment the modes you want available (and that you have the hardware for!)
+#define MODE_POTENTIOMETER               // At this time, a potentiometer is still required for time setting (and I have yet to make compiliation without that functionality an option)
+#define MODE_SKYLIGHT1                   // A piecewise brightness curve that just seemed to match what I wanted. Results in softer daylight brightness.
+#define MODE_SKYLIGHT2                   // An advanced, mathematical, and closest to reality brightness. 
+//#define MODE_PHOTO_MATCH               // This mode leverages photosensors - one viewing the outside sky and another viewing the area under the LED panel and strives to make them match. This is the least tested and developed mode today. 
+//#define MODE_DEMO                      // A simple slow (but scaled) progression to test all valid PWM values - useful to finding the best MIN_ILLUM and DAYLIGHT values.
 
 // Pin Designations
 #define LED_PIN 11
@@ -77,19 +110,16 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 unsigned long currentMillis = 0;         // stores the value of millis() in each iteration of loop()
 unsigned long previousMillis = 0;        // for various timings - mode dependent
 unsigned long lastInteractionMillis = 0; // Global variable to track the last interaction time for OLED dimming
-unsigned long lastOledUpdateMillis = 0;  // Global variable to limit OLED updates
 uint8_t currentMode = 0;                 // 0-Manual, 1-Skylight1, 2-Skylight2, 3-PhotoMatch, 4-Demo
 uint8_t led_value = 10;                  // This will be the dynamic LED brightness sent to PWM
 uint16_t led_value16 = MIN_ILLUM16;      // 16-bit version. Only keeping the 8-bit for legacy compatibility
-#define ICR 0xffff                       // I don't really understand this but it's used in setting up 16-bit PWM
 bool isDimmed = false;                   // Variable to track the current display brightness state
-bool isOff = false;                      // Variable to track the current display brightness state
-#define BUTTON_DEBOUND_DELAY 50          // Debounce time in milliseconds
+bool isOff = false;                      // Variable to track the current display state
 
 // Global variables for MODE_POTENTIOMETER
 #if defined(MODE_POTENTIOMETER)
 int potval;                              // Used in mode 0 - value read from the potentiometer on pot_pin
-int previousInteractionPotval = 0;                  // Used to change to manual mode from other modes
+int previousInteractionPotval = 0;       // Used to change to manual mode from other modes
 int previousModePotval = 0;              // New variable to track potentiometer value for mode changes
 #define AVERAGE_BUFFER_SIZE 100          // Number of readings to average
 int potReadings[AVERAGE_BUFFER_SIZE];    // Array to store the potentiometer readings
@@ -125,24 +155,47 @@ boolean demoDirectionUp = true;          // Used in mode 4 - state variable
 uint8_t demoCounter = 255;               // Used in mode 4 - increment the 8-bit PWM value once every 256 iterations of the 16-bit loop
 #endif
 
-// Function Prototypes
-void handlePotentiometerMode(bool forceUpdate = false);
+// Function Prototypes - All mode handlers need to be defined regardless of inclusion so that button presses can still call them and result in cycling to the next mode.
+void handlePotentiometerMode(bool forceUpdate = false);  
 void handleSkylightMode1(bool forceUpdate = false);
+#ifdef MODE_SKYLIGHT2 // These helper functions are not required though.
+float direct_sunlight_brightness(float elevation, float I0 = 1361, float k = 0.2);
+float diffuse_sky_brightness(float elevation, float a = -1, float b = -0.32, float c = 0.43, float d = 1.25, float e = -0.35);
+float astronomical_twilight_brightness(float elevation);
+float combined_daytime_brightness(float elevation);
+float combined_brightness(float elevation);
+#endif
 void handleSkylightMode2(bool forceUpdate = false);
 void handlePhotoresistorMatchMode(bool forceUpdate = false);
 void handleDemoMode(bool forceUpdate = false);
+#ifdef MODE_DEMO // These helper functions are not required though.
 unsigned long getNextDemoInterval(uint16_t led_value16, bool goingUp);
+#endif
+
+// Function Prototypes - Utility functions
 void initializeEEPROM();
 void setupPWM16();
 void analogWrite16(uint8_t pin, uint16_t val);
-void readButton();
-void cycleModes();
-void enterDateTimeSettingMode();
-void adjustTime();
-void displayTimeSetting(const DateTime &now);
-void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool forceUpdate = false);
 uint8_t gammaCorrection(uint8_t led_value, float gamma = 2.2);
 uint16_t gammaCorrection16(uint16_t led_value16, float gamma = 2.2);
+
+// Function Prototypes - Button and mode cycling
+bool readDebouncedButton(int pin);
+void readButton();
+void cycleModes();
+
+// Function Prototypes - Time setting functions
+void enterDateTimeSettingMode();
+void waitForMiddle();
+void adjustDate(DateTime &now);
+void addDate(DateTime &date, int daysToAdd, int monthsToAdd, int yearsToAdd);
+void adjustTime(DateTime &now);
+
+// Function Prototypes - Display
+void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool forceUpdate = false);
+void displayDateSetting(const DateTime &now);
+void displayTimeSetting(const DateTime &now);
+
 
 // *** SETUP ***
 void setup() {
@@ -626,7 +679,7 @@ void setupPWM16() {
   | _BV(WGM11); // Mode 14: Fast PWM, TOP=ICR1
   TCCR1B = _BV(WGM13) | _BV(WGM12)
   | _BV(CS10); // Prescaler 1
-  ICR1 = ICR; // TOP counter value (Relieving OCR1A*)
+  ICR1 = 0xffff; // TOP counter value (Relieving OCR1A*)
 }
 
 //* 16-bit version of analogWrite(). Only for D9 & D10
@@ -635,6 +688,28 @@ void analogWrite16(uint8_t pin, uint16_t val) {
     case 9: OCR1A = val; break;
     case 10: OCR1B = val; break;
   }
+}
+
+// LED Gamma Correction Curve
+uint8_t gammaCorrection(uint8_t led_value, float gamma) {
+  // Normalize the input
+  float normalized_input = (float)led_value / 255.0;
+
+  // Apply gamma correction
+  float corrected = pow(normalized_input, gamma);
+
+  // Scale back to 0-255
+  return (uint8_t)(255 * corrected);
+}
+uint16_t gammaCorrection16(uint16_t led_value16, float gamma) {
+  // Normalize the input
+  float normalized_input = (float)led_value16 / 65535.0;
+
+  // Apply gamma correction
+  float corrected = pow(normalized_input, gamma);
+
+  // Scale back to 0-65535
+  return (uint16_t)(65535 * corrected);
 }
 
 // Function to debounce button presses
@@ -792,27 +867,6 @@ void adjustDate(DateTime &now) {
   } // Button has been pressed again
 }
 
-// Function to display the current date in a specific format on the OLED
-void displayDateSetting(const DateTime &now) {
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("Set Date Mode");
-
-  display.print("Day: ");
-  if (now.day() < 10) display.print('0'); // Add leading zero if necessary
-  display.println(now.day());
-
-  display.print("Month: ");
-  if (now.month() < 10) display.print('0'); // Add leading zero if necessary
-  display.println(now.month());
-
-  display.print("Year: ");
-  display.println(now.year());
-
-  display.display();
-}
-
-
 // Function to add days, months, and years to a DateTime object
 void addDate(DateTime &date, int daysToAdd, int monthsToAdd, int yearsToAdd) {
   // Days in each month
@@ -889,38 +943,12 @@ void adjustTime(DateTime &now) {
   } // Button has been pressed again
 }
 
-// Function to display the current time in a specific format on the OLED
-void displayTimeSetting(const DateTime &now) {
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("Set Time Mode");
-
-  int hour = now.hour();
-  char am_pm[3] = "AM";
-  if (hour == 0) {
-    hour = 12; // Midnight case
-  } else if (hour == 12) {
-    am_pm[0] = 'P'; // Noon case
-  } else if (hour > 12) {
-    hour -= 12;
-    am_pm[0] = 'P';
-  }
-
-  if (hour < 10) display.print('0'); // Add leading zero if necessary
-  display.print(hour);
-  display.print(':');
-  if (now.minute() < 10) display.print('0'); // Add leading zero if necessary
-  display.print(now.minute());
-  display.print(' ');
-  display.println(am_pm);
-
-  display.display();
-}
-
 // Updates to the OLED display
 void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool forceUpdate) {
+  static unsigned long lastOledUpdateMillis = 0;  // Used to limit OLED updates
+
   // If the display is supposed to be off, or it has already been updated recently, skip updating the display
-  if ((currentMillis - lastOledUpdateMillis) < OLED_UPDATE_INTERVAL || isOff) {
+  if (isOff || (currentMillis - lastOledUpdateMillis) < OLED_UPDATE_INTERVAL) {
     if (forceUpdate == false) { // Unless force update was selected
       return;
     }
@@ -996,24 +1024,51 @@ void updateDisplay(const char* mode, float elevation, uint16_t led_value16, bool
   display.display();
 }
 
-// LED Gamma Correction Curve
-uint8_t gammaCorrection(uint8_t led_value, float gamma) {
-  // Normalize the input
-  float normalized_input = (float)led_value / 255.0;
+// Function to display the current date in a specific format on the OLED
+void displayDateSetting(const DateTime &now) {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Set Date Mode");
 
-  // Apply gamma correction
-  float corrected = pow(normalized_input, gamma);
+  display.print("Day: ");
+  if (now.day() < 10) display.print('0'); // Add leading zero if necessary
+  display.println(now.day());
 
-  // Scale back to 0-255
-  return (uint8_t)(255 * corrected);
+  display.print("Month: ");
+  if (now.month() < 10) display.print('0'); // Add leading zero if necessary
+  display.println(now.month());
+
+  display.print("Year: ");
+  display.println(now.year());
+
+  display.display();
 }
-uint16_t gammaCorrection16(uint16_t led_value16, float gamma) {
-  // Normalize the input
-  float normalized_input = (float)led_value16 / 65535.0;
 
-  // Apply gamma correction
-  float corrected = pow(normalized_input, gamma);
+// Function to display the current time in a specific format on the OLED
+void displayTimeSetting(const DateTime &now) {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Set Time Mode");
 
-  // Scale back to 0-65535
-  return (uint16_t)(65535 * corrected);
+  int hour = now.hour();
+  char am_pm[3] = "AM";
+  if (hour == 0) {
+    hour = 12; // Midnight case
+  } else if (hour == 12) {
+    am_pm[0] = 'P'; // Noon case
+  } else if (hour > 12) {
+    hour -= 12;
+    am_pm[0] = 'P';
+  }
+
+  if (hour < 10) display.print('0'); // Add leading zero if necessary
+  display.print(hour);
+  display.print(':');
+  if (now.minute() < 10) display.print('0'); // Add leading zero if necessary
+  display.print(now.minute());
+  display.print(' ');
+  display.println(am_pm);
+
+  display.display();
 }
+
