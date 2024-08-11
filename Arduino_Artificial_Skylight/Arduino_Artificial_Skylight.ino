@@ -467,7 +467,7 @@ void handleSkylightMode1(bool forceUpdate) {
 // Artificial Skylight Mode 2
 #if defined(MODE_SKYLIGHT2)
 // Function to calculate the intensity of direct sunlight based on solar elevation using the Solar Air Mass model
-float direct_sunlight_brightness(float elevation, float I0 = 1361, float k = 0.2) {
+float direct_sunlight_brightness(float elevation, float I0, float k) {
     if (elevation > MATCH_ELEVATION) {
         float zenith_angle = 90 - elevation;
         float AM = 1 / (cos(radians(zenith_angle)) + 0.50572 * pow((96.07995 - zenith_angle), -1.6364));
@@ -478,7 +478,7 @@ float direct_sunlight_brightness(float elevation, float I0 = 1361, float k = 0.2
 }
 
 // Function to calculate diffuse sky light using the simplified Perez model
-float diffuse_sky_brightness(float elevation, float a = -1, float b = -0.32, float c = 0.43, float d = 1.25, float e = -0.35) {
+float diffuse_sky_brightness(float elevation, float a, float b, float c, float d, float e) {
     if (elevation < MATCH_ELEVATION) {
         return 0;
     } else {
